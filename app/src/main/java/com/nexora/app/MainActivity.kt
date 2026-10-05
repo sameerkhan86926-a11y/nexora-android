@@ -2,6 +2,7 @@ package com.nexora.app
 
 import android.Manifest
 import android.app.role.RoleManager
+import android.content.ContentProviderOperation
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -97,6 +99,7 @@ class MainActivity : ComponentActivity() {
     private val darkModeState = mutableStateOf(false)
     private val isAppUnlockedState = mutableStateOf(false)
     private val activeInCallState = mutableStateOf<String?>(null)
+    private val showAddContactDialog = mutableStateOf(false)
 
     private val prefs by lazy { getSharedPreferences("nexora_prefs", Context.MODE_PRIVATE) }
 
@@ -137,6 +140,16 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     NexoraApp()
+                }
+
+                if (showAddContactDialog.value) {
+                    AddContactDialog(
+                        onDismiss = { showAddContactDialog.value = false },
+                        onSave = { name, phone, group ->
+                            saveNewContact(name, phone, group)
+                            showAddContactDialog.value = false
+                        }
+                    )
                 }
             }
         }
@@ -238,6 +251,58 @@ class MainActivity : ComponentActivity() {
 
             withContext(Dispatchers.Main) {
                 contactsState.value = result
+            }
+        }
+    }
+
+    // --- SAVE NEW CONTACT FUNCTION ---
+    private fun saveNewContact(name: String, phoneNumber: String, group: String) {
+        if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.WRITE_CONTACTS))
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val ops = ArrayList<ContentProviderOperation>()
+
+                // Raw contact insert
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
+                        .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
+                        .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
+                        .build()
+                )
+
+                // Display Name insert
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
+                        .build()
+                )
+
+                // Phone number insert
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phoneNumber)
+                        .withValue(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+                        .build()
+                )
+
+                contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Contact saved successfully!", Toast.LENGTH_SHORT).show()
+                    loadContacts()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Failed to save contact: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -414,6 +479,18 @@ class MainActivity : ComponentActivity() {
                     currentTab = currentTabState.value,
                     onTabSelected = { currentTabState.value = it }
                 )
+            },
+            floatingActionButton = {
+                if (currentTabState.value == NexoraTab.CONTACTS) {
+                    FloatingActionButton(
+                        onClick = { showAddContactDialog.value = true },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = CircleShape
+                    ) {
+                        Icon(Icons.Default.PersonAdd, contentDescription = "Add Contact")
+                    }
+                }
             }
         ) { padding ->
             Surface(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -452,6 +529,72 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // --- DIALOG: CREATE NEW CONTACT ---
+    @Composable
+    private fun AddContactDialog(
+        onDismiss: () -> Unit,
+        onSave: (String, String, String) -> Unit
+    ) {
+        var name by remember { mutableStateOf("") }
+        var phone by remember { mutableStateOf("") }
+        var selectedGroup by remember { mutableStateOf("General") }
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Add New Contact", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Name") },
+                        leadingIcon = { Icon(Icons.Default.Person, null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = phone,
+                        onValueChange = { phone = it },
+                        label = { Text("Phone Number") },
+                        leadingIcon = { Icon(Icons.Default.Phone, null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("Select Group", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("General", "Family", "Work").forEach { grp ->
+                            FilterChip(
+                                selected = selectedGroup == grp,
+                                onClick = { selectedGroup = grp },
+                                label = { Text(grp, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (name.isNotBlank() && phone.isNotBlank()) {
+                            onSave(name.trim(), phone.trim(), selectedGroup)
+                        }
+                    },
+                    enabled = name.isNotBlank() && phone.isNotBlank()
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     // --- PHOTO MATCHING IN-CALL SCREEN ---
     @Composable
     private fun InCallScreen(number: String, contactName: String, onEndCall: () -> Unit) {
@@ -461,7 +604,6 @@ class MainActivity : ComponentActivity() {
         var isSpeaker by remember { mutableStateOf(false) }
         var callSeconds by remember { mutableStateOf(0) }
 
-        // Live Call Timer
         LaunchedEffect(Unit) {
             while (true) {
                 delay(1000L)
@@ -480,7 +622,6 @@ class MainActivity : ComponentActivity() {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top Header: Contact Details & Timer
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 28.dp)) {
                     Box(
                         modifier = Modifier
@@ -509,12 +650,10 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                // Middle 6-Button Grid (Exact match from photo)
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(24.dp)
                 ) {
-                    // Row 1
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
                         InCallGridButton(
                             icon = Icons.Default.GraphicEq,
@@ -536,7 +675,6 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // Row 2
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
                         InCallGridButton(
                             icon = Icons.Default.Videocam,
@@ -559,7 +697,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Bottom Action Controls: Speaker, End Call, Keypad
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -567,7 +704,6 @@ class MainActivity : ComponentActivity() {
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Speaker Button
                     FilledIconButton(
                         onClick = { isSpeaker = !isSpeaker },
                         shape = CircleShape,
@@ -584,7 +720,6 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // End Call Button (Center Big Red)
                     FilledIconButton(
                         onClick = onEndCall,
                         shape = CircleShape,
@@ -599,7 +734,6 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // Dialpad Button
                     FilledIconButton(
                         onClick = { },
                         shape = CircleShape,
