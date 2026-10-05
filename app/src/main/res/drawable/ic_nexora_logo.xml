@@ -1,0 +1,18 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Gradient Background Circle -->
+    <path
+        android:pathData="M54,4 C26.39,4 4,26.39 4,54 C4,81.61 26.39,104 54,104 C81.61,104 104,81.61 104,54 C104,26.39 81.61,4 54,4 Z"
+        android:fillColor="#1E88E5"/>
+    <!-- Futuristic Nexora Phone Emblem -->
+    <path
+        android:pathData="M40.5,33 C38.5,33 36.5,34.5 36.1,36.5 C34.5,44.5 37.5,56.5 48.5,67.5 C59.5,78.5 71.5,81.5 79.5,79.9 C81.5,79.5 83,77.5 83,75.5 L83,68.5 C83,66.8 81.8,65.4 80.2,65.1 L72,63.5 C70.6,63.2 69.1,63.7 68.2,64.8 L65.5,68.2 C58.5,64.5 53.5,59.5 49.8,52.5 L53.2,49.8 C54.3,48.9 54.8,47.4 54.5,46 L52.9,37.8 C52.6,36.2 51.2,35 49.5,35 L40.5,33 Z"
+        android:fillColor="#FFFFFF"/>
+    <!-- Smart Glow Accent -->
+    <path
+        android:pathData="M66,32 A8,8 0 1,0 66,48 A8,8 0 1,0 66,32 Z"
+        android:fillColor="#00E676"/>
+</vector>
