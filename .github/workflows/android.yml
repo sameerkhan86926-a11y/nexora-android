@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build APK
+    name: Build NEXORA APK
     runs-on: ubuntu-latest
 
     steps:
@@ -28,18 +28,17 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-36
-            build-tools;36.0.0
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
+      - name: Install Android SDK
+        run: |
+          sdkmanager "platforms;android-36"
+          sdkmanager "build-tools;36.0.0"
+          yes | sdkmanager --licenses
 
       - name: Build NEXORA APK
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload NEXORA APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: nexora-debug-apk
