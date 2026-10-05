@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -731,8 +732,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // RowScope add karne se Modifier.weight() resolve ho jayega
     @Composable
-    private fun FilterButton(
+    private fun RowScope.FilterButton(
         title: String,
         selected: Boolean,
         onClick: () -> Unit
