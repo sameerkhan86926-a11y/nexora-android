@@ -2,7 +2,6 @@ package com.nexora.app
 
 import android.Manifest
 import android.content.ContentUris
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -31,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
@@ -79,6 +79,13 @@ enum class NexoraTab {
     RECENTS
 }
 
+enum class ContactFilter {
+    ALL,
+    RECENT,
+    FREQUENT,
+    DUPLICATES
+}
+
 class MainActivity : ComponentActivity() {
 
     private val contactsState =
@@ -100,7 +107,6 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { result ->
-
             val contactsAllowed =
                 result[Manifest.permission.READ_CONTACTS] == true ||
                     hasPermission(Manifest.permission.READ_CONTACTS)
@@ -118,7 +124,6 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-
             if (granted) {
                 loadContacts()
                 loadRecentCalls()
@@ -127,6 +132,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        darkModeState.value =
+            getSharedPreferences("nexora_settings", MODE_PRIVATE)
+                .getBoolean("dark_mode", false)
 
         setContent {
             NexoraTheme(
@@ -159,7 +168,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestInitialPermissions() {
-
         val permissions = mutableListOf<String>()
 
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) {
@@ -175,9 +183,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (permissions.isNotEmpty()) {
-            permissionLauncher.launch(
-                permissions.toTypedArray()
-            )
+            permissionLauncher.launch(permissions.toTypedArray())
         } else {
             loadContacts()
             loadRecentCalls()
@@ -185,7 +191,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadContacts() {
-
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) {
             return
         }
@@ -206,53 +211,25 @@ class MainActivity : ComponentActivity() {
             null,
             ContactsContract.Contacts.DISPLAY_NAME + " COLLATE LOCALIZED ASC"
         )?.use { cursor ->
-
-            val idIndex =
-                cursor.getColumnIndex(
-                    ContactsContract.Contacts._ID
-                )
-
-            val nameIndex =
-                cursor.getColumnIndex(
-                    ContactsContract.Contacts.DISPLAY_NAME
-                )
-
-            val starredIndex =
-                cursor.getColumnIndex(
-                    ContactsContract.Contacts.STARRED
-                )
-
-            val phoneIndex =
-                cursor.getColumnIndex(
-                    ContactsContract.Contacts.HAS_PHONE_NUMBER
-                )
+            val idIndex = cursor.getColumnIndex(ContactsContract.Contacts._ID)
+            val nameIndex = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
+            val starredIndex = cursor.getColumnIndex(ContactsContract.Contacts.STARRED)
+            val phoneIndex = cursor.getColumnIndex(ContactsContract.Contacts.HAS_PHONE_NUMBER)
 
             while (cursor.moveToNext()) {
-
-                if (
-                    idIndex < 0 ||
-                    nameIndex < 0 ||
-                    phoneIndex < 0
-                ) {
+                if (idIndex < 0 || nameIndex < 0 || phoneIndex < 0) {
                     continue
                 }
 
-                val id =
-                    cursor.getString(idIndex)
-
-                val name =
-                    cursor.getString(nameIndex)
-                        ?: "Unknown"
-
-                val hasPhone =
-                    cursor.getInt(phoneIndex) > 0
+                val id = cursor.getString(idIndex)
+                val name = cursor.getString(nameIndex) ?: "Unknown"
+                val hasPhone = cursor.getInt(phoneIndex) > 0
 
                 if (!hasPhone) {
                     continue
                 }
 
-                val phones =
-                    getPhoneNumbers(id)
+                val phones = getPhoneNumbers(id)
 
                 if (phones.isEmpty()) {
                     continue
@@ -279,10 +256,7 @@ class MainActivity : ComponentActivity() {
         contactsState.value = result
     }
 
-    private fun getPhoneNumbers(
-        contactId: String
-    ): List<String> {
-
+    private fun getPhoneNumbers(contactId: String): List<String> {
         val numbers = mutableListOf<String>()
 
         val projection = arrayOf(
@@ -296,23 +270,16 @@ class MainActivity : ComponentActivity() {
             arrayOf(contactId),
             null
         )?.use { cursor ->
-
             val index =
                 cursor.getColumnIndex(
                     ContactsContract.CommonDataKinds.Phone.NUMBER
                 )
 
             if (index >= 0) {
-
                 while (cursor.moveToNext()) {
+                    val number = cursor.getString(index)
 
-                    val number =
-                        cursor.getString(index)
-
-                    if (
-                        !number.isNullOrBlank() &&
-                        !numbers.contains(number)
-                    ) {
+                    if (!number.isNullOrBlank() && !numbers.contains(number)) {
                         numbers.add(number)
                     }
                 }
@@ -323,7 +290,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadRecentCalls() {
-
         if (!hasPermission(Manifest.permission.READ_CALL_LOG)) {
             return
         }
@@ -345,63 +311,36 @@ class MainActivity : ComponentActivity() {
             null,
             CallLog.Calls.DATE + " DESC"
         )?.use { cursor ->
-
-            val idIndex =
-                cursor.getColumnIndex(CallLog.Calls._ID)
-
-            val numberIndex =
-                cursor.getColumnIndex(CallLog.Calls.NUMBER)
-
-            val nameIndex =
-                cursor.getColumnIndex(CallLog.Calls.CACHED_NAME)
-
-            val typeIndex =
-                cursor.getColumnIndex(CallLog.Calls.TYPE)
-
-            val dateIndex =
-                cursor.getColumnIndex(CallLog.Calls.DATE)
+            val idIndex = cursor.getColumnIndex(CallLog.Calls._ID)
+            val numberIndex = cursor.getColumnIndex(CallLog.Calls.NUMBER)
+            val nameIndex = cursor.getColumnIndex(CallLog.Calls.CACHED_NAME)
+            val typeIndex = cursor.getColumnIndex(CallLog.Calls.TYPE)
+            val dateIndex = cursor.getColumnIndex(CallLog.Calls.DATE)
 
             var count = 0
 
             while (cursor.moveToNext() && count < 100) {
-
-                if (
-                    idIndex < 0 ||
-                    numberIndex < 0 ||
-                    typeIndex < 0 ||
-                    dateIndex < 0
-                ) {
+                if (idIndex < 0 || numberIndex < 0 || typeIndex < 0 || dateIndex < 0) {
                     continue
                 }
 
-                val id =
-                    cursor.getString(idIndex)
-
-                val number =
-                    cursor.getString(numberIndex)
-                        ?: "Unknown"
+                val id = cursor.getString(idIndex)
+                val number = cursor.getString(numberIndex) ?: "Unknown"
 
                 val name =
                     if (nameIndex >= 0) {
-                        cursor.getString(nameIndex)
-                            ?: findContactName(number)
+                        cursor.getString(nameIndex) ?: findContactName(number)
                     } else {
                         findContactName(number)
                     }
-
-                val type =
-                    cursor.getInt(typeIndex)
-
-                val date =
-                    cursor.getLong(dateIndex)
 
                 result.add(
                     NexoraCall(
                         id = id,
                         number = number,
                         name = name,
-                        type = type,
-                        date = date
+                        type = cursor.getInt(typeIndex),
+                        date = cursor.getLong(dateIndex)
                     )
                 )
 
@@ -412,34 +351,26 @@ class MainActivity : ComponentActivity() {
         callsState.value = result
     }
 
-    private fun findContactName(
-        number: String
-    ): String {
-
+    private fun findContactName(number: String): String {
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) {
             return number
         }
 
         contentResolver.query(
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-            arrayOf(
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
-            ),
+            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME),
             "${ContactsContract.CommonDataKinds.Phone.NUMBER} = ?",
             arrayOf(number),
             null
         )?.use { cursor ->
-
             if (cursor.moveToFirst()) {
-
                 val index =
                     cursor.getColumnIndex(
                         ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
                     )
 
                 if (index >= 0) {
-                    return cursor.getString(index)
-                        ?: number
+                    return cursor.getString(index) ?: number
                 }
             }
         }
@@ -448,148 +379,99 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun makeCall(number: String) {
-
-        val cleanNumber =
-            number.trim()
+        val cleanNumber = number.trim()
 
         if (cleanNumber.isBlank()) {
             return
         }
 
         if (!hasPermission(Manifest.permission.CALL_PHONE)) {
-
-            singlePermissionLauncher.launch(
-                Manifest.permission.CALL_PHONE
-            )
-
+            singlePermissionLauncher.launch(Manifest.permission.CALL_PHONE)
             return
         }
 
         try {
-
-            val intent =
+            startActivity(
                 Intent(
                     Intent.ACTION_CALL,
-                    Uri.parse(
-                        "tel:" +
-                            Uri.encode(cleanNumber)
-                    )
+                    Uri.parse("tel:${Uri.encode(cleanNumber)}")
                 )
-
-            startActivity(intent)
-
+            )
         } catch (_: Exception) {
-
-            val dialIntent =
-                Intent(
-                    Intent.ACTION_DIAL,
-                    Uri.parse(
-                        "tel:" +
-                            Uri.encode(cleanNumber)
+            try {
+                startActivity(
+                    Intent(
+                        Intent.ACTION_DIAL,
+                        Uri.parse("tel:${Uri.encode(cleanNumber)}")
                     )
                 )
-
-            startActivity(dialIntent)
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun sendSms(number: String) {
-
-        val intent =
-            Intent(
-                Intent.ACTION_SENDTO,
-                Uri.parse(
-                    "smsto:" +
-                        Uri.encode(number)
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_SENDTO,
+                    Uri.parse("smsto:${Uri.encode(number)}")
                 )
             )
-
-        try {
-            startActivity(intent)
         } catch (_: Exception) {
         }
     }
 
     private fun addContact() {
-
-        val intent =
-            Intent(
-                Intent.ACTION_INSERT
-            ).apply {
-                type =
-                    ContactsContract.Contacts.CONTENT_TYPE
-            }
-
         try {
-            startActivity(intent)
+            startActivity(
+                Intent(Intent.ACTION_INSERT).apply {
+                    type = ContactsContract.Contacts.CONTENT_TYPE
+                }
+            )
         } catch (_: Exception) {
         }
     }
 
-    private fun editContact(
-        contact: NexoraContact
-    ) {
-
-        val uri =
-            ContentUris.withAppendedId(
-                ContactsContract.Contacts.CONTENT_URI,
-                contact.id.toLong()
-            )
-
-        val intent =
-            Intent(
-                Intent.ACTION_EDIT,
-                uri
-            )
-
+    private fun editContact(contact: NexoraContact) {
         try {
-            startActivity(intent)
+            val uri =
+                ContentUris.withAppendedId(
+                    ContactsContract.Contacts.CONTENT_URI,
+                    contact.id.toLong()
+                )
+
+            startActivity(Intent(Intent.ACTION_EDIT, uri))
         } catch (_: Exception) {
         }
     }
 
-    private fun deleteContact(
-        contact: NexoraContact
-    ) {
-
+    private fun deleteContact(contact: NexoraContact) {
         if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) {
             permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.WRITE_CONTACTS
-                )
+                arrayOf(Manifest.permission.WRITE_CONTACTS)
             )
             return
         }
 
-        val uri =
-            ContentUris.withAppendedId(
-                ContactsContract.Contacts.CONTENT_URI,
-                contact.id.toLong()
-            )
-
         try {
-            contentResolver.delete(
-                uri,
-                null,
-                null
-            )
+            val uri =
+                ContentUris.withAppendedId(
+                    ContactsContract.Contacts.CONTENT_URI,
+                    contact.id.toLong()
+                )
 
+            contentResolver.delete(uri, null, null)
             selectedContactState.value = null
             loadContacts()
-
         } catch (_: Exception) {
         }
     }
 
-    private fun toggleFavorite(
-        contact: NexoraContact
-    ) {
-
+    private fun toggleFavorite(contact: NexoraContact) {
         if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) {
             permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.WRITE_CONTACTS
-                )
+                arrayOf(Manifest.permission.WRITE_CONTACTS)
             )
             return
         }
@@ -609,33 +491,107 @@ class MainActivity : ComponentActivity() {
             }
 
         try {
-
-            contentResolver.update(
-                uri,
-                values,
-                null,
-                null
-            )
-
+            contentResolver.update(uri, values, null, null)
             loadContacts()
 
             selectedContactState.value =
                 contactsState.value.firstOrNull {
                     it.id == contact.id
                 }
-
         } catch (_: Exception) {
         }
     }
 
+    private fun setDarkMode(enabled: Boolean) {
+        darkModeState.value = enabled
+
+        getSharedPreferences(
+            "nexora_settings",
+            MODE_PRIVATE
+        ).edit()
+            .putBoolean("dark_mode", enabled)
+            .apply()
+    }
+
+    private fun normalizeNumber(number: String): String {
+        return number.filter { it.isDigit() }.takeLast(10)
+    }
+
+    private fun recentContactIds(
+        contacts: List<NexoraContact>
+    ): Set<String> {
+        val recentNumbers =
+            callsState.value
+                .take(30)
+                .map { normalizeNumber(it.number) }
+                .filter { it.isNotBlank() }
+                .toSet()
+
+        return contacts
+            .filter { contact ->
+                contact.phones.any {
+                    normalizeNumber(it) in recentNumbers
+                }
+            }
+            .map { it.id }
+            .toSet()
+    }
+
+    private fun frequentContactIds(
+        contacts: List<NexoraContact>
+    ): Set<String> {
+        val counts = mutableMapOf<String, Int>()
+
+        callsState.value.forEach { call ->
+            val normalized = normalizeNumber(call.number)
+
+            if (normalized.isNotBlank()) {
+                counts[normalized] =
+                    (counts[normalized] ?: 0) + 1
+            }
+        }
+
+        return contacts
+            .filter { contact ->
+                contact.phones.any {
+                    (counts[normalizeNumber(it)] ?: 0) >= 2
+                }
+            }
+            .sortedByDescending { contact ->
+                contact.phones.maxOfOrNull {
+                    counts[normalizeNumber(it)] ?: 0
+                } ?: 0
+            }
+            .map { it.id }
+            .toSet()
+    }
+
+    private fun duplicateContactIds(
+        contacts: List<NexoraContact>
+    ): Set<String> {
+        val groups =
+            contacts
+                .flatMap { contact ->
+                    contact.phones.map { number ->
+                        normalizeNumber(number) to contact.id
+                    }
+                }
+                .filter { it.first.length >= 7 }
+                .groupBy { it.first }
+
+        return groups
+            .filterValues { it.map { pair -> pair.second }.distinct().size > 1 }
+            .values
+            .flatten()
+            .map { it.second }
+            .toSet()
+    }
+
     @Composable
     private fun NexoraApp() {
-
-        val selectedContact =
-            selectedContactState.value
+        val selectedContact = selectedContactState.value
 
         if (selectedContact != null) {
-
             ContactDetailsScreen(
                 contact = selectedContact,
                 onBack = {
@@ -657,7 +613,6 @@ class MainActivity : ComponentActivity() {
                     toggleFavorite(selectedContact)
                 }
             )
-
             return
         }
 
@@ -671,65 +626,56 @@ class MainActivity : ComponentActivity() {
                 )
             }
         ) { padding ->
-
             Surface(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-
                 when (currentTabState.value) {
+                    NexoraTab.CONTACTS -> ContactsScreen(
+                        contacts = contactsState.value,
+                        calls = callsState.value,
+                        onContactClick = {
+                            selectedContactState.value = it
+                        },
+                        onAdd = {
+                            addContact()
+                        },
+                        onOpenDialer = {
+                            currentTabState.value = NexoraTab.DIALER
+                        },
+                        onToggleDark = {
+                            setDarkMode(!darkModeState.value)
+                        },
+                        darkMode = darkModeState.value
+                    )
 
-                    NexoraTab.CONTACTS -> {
+                    NexoraTab.FAVORITES -> FavoritesScreen(
+                        contacts = contactsState.value.filter { it.starred },
+                        onContactClick = {
+                            selectedContactState.value = it
+                        },
+                        onAdd = {
+                            addContact()
+                        }
+                    )
 
-                        ContactsScreen(
-                            contacts = contactsState.value,
-                            onContactClick = {
-                                selectedContactState.value = it
-                            },
-                            onAdd = {
-                                addContact()
-                            }
-                        )
-                    }
+                    NexoraTab.DIALER -> DialerScreen(
+                        contacts = contactsState.value,
+                        onCall = {
+                            makeCall(it)
+                        },
+                        onSms = {
+                            sendSms(it)
+                        }
+                    )
 
-                    NexoraTab.FAVORITES -> {
-
-                        FavoritesScreen(
-                            contacts =
-                                contactsState.value.filter {
-                                    it.starred
-                                },
-                            onContactClick = {
-                                selectedContactState.value = it
-                            },
-                            onAdd = {
-                                addContact()
-                            }
-                        )
-                    }
-
-                    NexoraTab.DIALER -> {
-
-                        DialerScreen(
-                            onCall = {
-                                makeCall(it)
-                            },
-                            onSms = {
-                                sendSms(it)
-                            }
-                        )
-                    }
-
-                    NexoraTab.RECENTS -> {
-
-                        RecentsScreen(
-                            calls = callsState.value,
-                            onCall = {
-                                makeCall(it)
-                            }
-                        )
-                    }
+                    NexoraTab.RECENTS -> RecentsScreen(
+                        calls = callsState.value,
+                        onCall = {
+                            makeCall(it)
+                        }
+                    )
                 }
             }
         }
@@ -738,113 +684,214 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ContactsScreen(
         contacts: List<NexoraContact>,
+        calls: List<NexoraCall>,
         onContactClick: (NexoraContact) -> Unit,
-        onAdd: () -> Unit
+        onAdd: () -> Unit,
+        onOpenDialer: () -> Unit,
+        onToggleDark: () -> Unit,
+        darkMode: Boolean
     ) {
+        var search by remember { mutableStateOf("") }
+        var filter by remember { mutableStateOf(ContactFilter.ALL) }
 
-        var search by remember {
-            mutableStateOf("")
+        val recentIds = remember(contacts, calls) {
+            recentContactIds(contacts)
+        }
+
+        val frequentIds = remember(contacts, calls) {
+            frequentContactIds(contacts)
+        }
+
+        val duplicateIds = remember(contacts) {
+            duplicateContactIds(contacts)
         }
 
         val filtered =
             remember(
                 contacts,
-                search
+                search,
+                filter,
+                recentIds,
+                frequentIds,
+                duplicateIds
             ) {
+                var result = contacts
 
-                if (search.isBlank()) {
-                    contacts
-                } else {
-                    contacts.filter {
-                        it.name.contains(
-                            search,
-                            ignoreCase = true
-                        ) ||
-                            it.phones.any {
-                                number ->
+                result =
+                    when (filter) {
+                        ContactFilter.ALL -> result
+                        ContactFilter.RECENT ->
+                            result.filter { it.id in recentIds }
+                        ContactFilter.FREQUENT ->
+                            result.filter { it.id in frequentIds }
+                        ContactFilter.DUPLICATES ->
+                            result.filter { it.id in duplicateIds }
+                    }
+
+                if (search.isNotBlank()) {
+                    result.filter {
+                        it.name.contains(search, ignoreCase = true) ||
+                            it.phones.any { number ->
                                 number.contains(search)
                             }
                     }
+                } else {
+                    result
                 }
             }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(20.dp)
+                .padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement =
-                    Arrangement.SpaceBetween,
-                verticalAlignment =
-                    Alignment.CenterVertically
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-
                 Column {
-
                     Text(
                         text = "NEXORA",
-                        style =
-                            MaterialTheme.typography.headlineMedium,
-                        fontWeight =
-                            FontWeight.Bold
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold
                     )
 
                     Text(
-                        text = "Contacts",
-                        style =
-                            MaterialTheme.typography.bodyMedium
+                        text = "Smart Phone & Contacts",
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
 
-                Button(
-                    onClick = onAdd
-                ) {
-                    Text("Add")
+                Row {
+                    TextButton(onClick = onToggleDark) {
+                        Text(if (darkMode) "Light" else "Dark")
+                    }
+
+                    Button(
+                        onClick = onAdd,
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Add")
+                    }
                 }
             }
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
-            )
+            Spacer(Modifier.height(14.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor =
+                        MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    StatItem(
+                        value = contacts.size.toString(),
+                        label = "Contacts"
+                    )
+
+                    StatItem(
+                        value = contacts.count { it.starred }.toString(),
+                        label = "Favorites"
+                    )
+
+                    StatItem(
+                        value = calls.size.toString(),
+                        label = "Calls"
+                    )
+
+                    StatItem(
+                        value = duplicateIds.size.toString(),
+                        label = "Duplicates"
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = search,
-                onValueChange = {
-                    search = it
-                },
+                onValueChange = { search = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = {
-                    Text("Search contacts")
-                },
+                label = { Text("Search name or number") },
                 singleLine = true
             )
 
-            Spacer(
-                modifier = Modifier.height(12.dp)
-            )
+            Spacer(Modifier.height(10.dp))
 
-            Text(
-                text =
-                    "${filtered.size} contacts",
-                style =
-                    MaterialTheme.typography.bodyMedium
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilterButton(
+                    title = "All",
+                    selected = filter == ContactFilter.ALL,
+                    onClick = { filter = ContactFilter.ALL }
+                )
 
-            Spacer(
-                modifier = Modifier.height(8.dp)
-            )
+                FilterButton(
+                    title = "Recent",
+                    selected = filter == ContactFilter.RECENT,
+                    onClick = { filter = ContactFilter.RECENT }
+                )
+
+                FilterButton(
+                    title = "Frequent",
+                    selected = filter == ContactFilter.FREQUENT,
+                    onClick = { filter = ContactFilter.FREQUENT }
+                )
+
+                FilterButton(
+                    title = "Duplicate",
+                    selected = filter == ContactFilter.DUPLICATES,
+                    onClick = { filter = ContactFilter.DUPLICATES }
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${filtered.size} contacts",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                OutlinedButton(onClick = onOpenDialer) {
+                    Text("Open Dialer")
+                }
+            }
+
+            Spacer(Modifier.height(4.dp))
 
             if (filtered.isEmpty()) {
-
                 EmptyState(
                     title =
-                        if (search.isBlank()) {
-                            "No contacts found"
-                        } else {
-                            "No matching contacts"
+                        when (filter) {
+                            ContactFilter.DUPLICATES ->
+                                "No duplicate contacts"
+                            ContactFilter.RECENT ->
+                                "No recent contacts"
+                            ContactFilter.FREQUENT ->
+                                "No frequent contacts"
+                            ContactFilter.ALL ->
+                                if (search.isBlank()) {
+                                    "No contacts found"
+                                } else {
+                                    "No matching contacts"
+                                }
                         },
                     message =
                         if (search.isBlank()) {
@@ -853,20 +900,14 @@ class MainActivity : ComponentActivity() {
                             "Try another name or phone number."
                         }
                 )
-
             } else {
-
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
-
                     items(
                         filtered,
-                        key = {
-                            it.id
-                        }
+                        key = { it.id }
                     ) { contact ->
-
                         ContactRow(
                             contact = contact,
                             onClick = {
@@ -880,74 +921,99 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun StatItem(
+        value: String,
+        label: String
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+
+    @Composable
+    private fun FilterButton(
+        title: String,
+        selected: Boolean,
+        onClick: () -> Unit
+    ) {
+        if (selected) {
+            Button(
+                onClick = onClick,
+                modifier = Modifier.weight(1f),
+                contentPadding = ButtonDefaults.ContentPadding
+            ) {
+                Text(title)
+            }
+        } else {
+            OutlinedButton(
+                onClick = onClick,
+                modifier = Modifier.weight(1f),
+                contentPadding = ButtonDefaults.ContentPadding
+            ) {
+                Text(title)
+            }
+        }
+    }
+
+    @Composable
     private fun FavoritesScreen(
         contacts: List<NexoraContact>,
         onContactClick: (NexoraContact) -> Unit,
         onAdd: () -> Unit
     ) {
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(20.dp)
         ) {
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement =
-                    Arrangement.SpaceBetween,
-                verticalAlignment =
-                    Alignment.CenterVertically
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-
                 Column {
-
                     Text(
                         text = "Favorites",
-                        style =
-                            MaterialTheme.typography.headlineMedium,
-                        fontWeight =
-                            FontWeight.Bold
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold
                     )
 
                     Text(
-                        text =
-                            "${contacts.size} favorite contacts"
+                        text = "${contacts.size} favorite contacts"
                     )
                 }
 
-                Button(
-                    onClick = onAdd
-                ) {
+                Button(onClick = onAdd) {
                     Text("Add")
                 }
             }
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
-            )
+            Spacer(Modifier.height(16.dp))
 
             if (contacts.isEmpty()) {
-
                 EmptyState(
                     title = "No favorites",
-                    message =
-                        "Open a contact and mark it as favorite."
+                    message = "Open a contact and mark it as favorite."
                 )
-
             } else {
-
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
-
                     items(
                         contacts,
-                        key = {
-                            it.id
-                        }
+                        key = { it.id }
                     ) { contact ->
-
                         ContactRow(
                             contact = contact,
                             onClick = {
@@ -965,97 +1031,70 @@ class MainActivity : ComponentActivity() {
         contact: NexoraContact,
         onClick: () -> Unit
     ) {
+        val firstLetter =
+            contact.name.trim().firstOrNull()?.uppercase() ?: "?"
 
-        Row(
+        Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(
-                    onClick = onClick
-                )
-                .padding(
-                    vertical = 12.dp
-                ),
-            verticalAlignment =
-                Alignment.CenterVertically
+                .padding(vertical = 5.dp)
+                .clickable(onClick = onClick),
+            shape = RoundedCornerShape(16.dp)
         ) {
-
-            val firstLetter =
-                contact.name
-                    .trim()
-                    .firstOrNull()
-                    ?.uppercase()
-                    ?: "?"
-
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(
-                        MaterialTheme.colorScheme
-                            .primaryContainer
-                    ),
-                contentAlignment =
-                    Alignment.Center
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(CircleShape)
+                        .background(
+                            MaterialTheme.colorScheme.primaryContainer
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = firstLetter,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
 
-                Text(
-                    text = firstLetter,
-                    fontWeight =
-                        FontWeight.Bold
-                )
-            }
+                Spacer(Modifier.width(14.dp))
 
-            Spacer(
-                modifier = Modifier.width(14.dp)
-            )
-
-            Column(
-                modifier =
-                    Modifier.weight(1f)
-            ) {
-
-                Text(
-                    text = contact.name,
-                    style =
-                        MaterialTheme.typography
-                            .titleMedium,
-                    fontWeight =
-                        FontWeight.SemiBold
-                )
-
-                Text(
-                    text =
-                        contact.phones.firstOrNull()
-                            ?: "",
-                    style =
-                        MaterialTheme.typography
-                            .bodyMedium
-                )
-
-                if (contact.phones.size > 1) {
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = contact.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
 
                     Text(
-                        text =
-                            "+${contact.phones.size - 1} more number",
-                        style =
-                            MaterialTheme.typography
-                                .bodySmall
+                        text = contact.phones.firstOrNull() ?: "",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    if (contact.phones.size > 1) {
+                        Text(
+                            text = "+${contact.phones.size - 1} more number",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                if (contact.starred) {
+                    Text(
+                        text = "Favorite",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
-
-            if (contact.starred) {
-
-                Text(
-                    text = "Favorite",
-                    style =
-                        MaterialTheme.typography
-                            .labelSmall
-                )
-            }
         }
-
-        Divider()
     }
 
     @Composable
@@ -1068,100 +1107,68 @@ class MainActivity : ComponentActivity() {
         onDelete: () -> Unit,
         onFavorite: () -> Unit
     ) {
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(20.dp)
         ) {
-
-            TextButton(
-                onClick = onBack
-            ) {
+            TextButton(onClick = onBack) {
                 Text("Back")
             }
 
-            Spacer(
-                modifier = Modifier.height(12.dp)
-            )
+            Spacer(Modifier.height(8.dp))
 
             Box(
                 modifier = Modifier
                     .size(86.dp)
                     .clip(CircleShape)
                     .background(
-                        MaterialTheme.colorScheme
-                            .primaryContainer
+                        MaterialTheme.colorScheme.primaryContainer
                     ),
-                contentAlignment =
-                    Alignment.Center
+                contentAlignment = Alignment.Center
             ) {
-
                 Text(
                     text =
-                        contact.name
-                            .firstOrNull()
-                            ?.uppercase()
-                            ?: "?",
-                    style =
-                        MaterialTheme.typography
-                            .headlineLarge,
-                    fontWeight =
-                        FontWeight.Bold
+                        contact.name.firstOrNull()?.uppercase() ?: "?",
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold
                 )
             }
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
-            )
+            Spacer(Modifier.height(14.dp))
 
             Text(
                 text = contact.name,
-                style =
-                    MaterialTheme.typography
-                        .headlineSmall,
-                fontWeight =
-                    FontWeight.Bold
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
             )
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
-            )
+            Spacer(Modifier.height(14.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement =
-                    Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-
                 Button(
                     onClick = {
-                        contact.phones
-                            .firstOrNull()
-                            ?.let(onCall)
+                        contact.phones.firstOrNull()?.let(onCall)
                     },
-                    modifier =
-                        Modifier.weight(1f)
+                    modifier = Modifier.weight(1f)
                 ) {
                     Text("Call")
                 }
 
                 OutlinedButton(
                     onClick = {
-                        contact.phones
-                            .firstOrNull()
-                            ?.let(onSms)
+                        contact.phones.firstOrNull()?.let(onSms)
                     },
-                    modifier =
-                        Modifier.weight(1f)
+                    modifier = Modifier.weight(1f)
                 ) {
                     Text("SMS")
                 }
             }
 
-            Spacer(
-                modifier = Modifier.height(12.dp)
-            )
+            Spacer(Modifier.height(10.dp))
 
             OutlinedButton(
                 onClick = onFavorite,
@@ -1176,71 +1183,55 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            Spacer(
-                modifier = Modifier.height(20.dp)
-            )
+            Spacer(Modifier.height(18.dp))
 
             Text(
                 text = "Phone numbers",
-                style =
-                    MaterialTheme.typography.titleMedium,
-                fontWeight =
-                    FontWeight.Bold
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
             )
 
-            Spacer(
-                modifier = Modifier.height(8.dp)
-            )
+            Spacer(Modifier.height(8.dp))
 
-            contact.phones.forEach { number ->
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(
-                            vertical = 4.dp
-                        ),
-                    colors =
-                        CardDefaults.cardColors()
-                ) {
-
-                    Column(
-                        modifier =
-                            Modifier.padding(14.dp)
+            LazyColumn(
+                modifier = Modifier.weight(1f)
+            ) {
+                items(contact.phones) { number ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp)
+                        ) {
+                            Text(
+                                text = number,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
 
-                        Text(
-                            text = number,
-                            style =
-                                MaterialTheme.typography
-                                    .bodyLarge
-                        )
-
-                        Row {
-
-                            TextButton(
-                                onClick = {
-                                    onCall(number)
+                            Row {
+                                TextButton(
+                                    onClick = {
+                                        onCall(number)
+                                    }
+                                ) {
+                                    Text("Call")
                                 }
-                            ) {
-                                Text("Call")
-                            }
 
-                            TextButton(
-                                onClick = {
-                                    onSms(number)
+                                TextButton(
+                                    onClick = {
+                                        onSms(number)
+                                    }
+                                ) {
+                                    Text("SMS")
                                 }
-                            ) {
-                                Text("SMS")
                             }
                         }
                     }
                 }
             }
-
-            Spacer(
-                modifier = Modifier.height(20.dp)
-            )
 
             OutlinedButton(
                 onClick = onEdit,
@@ -1249,9 +1240,7 @@ class MainActivity : ComponentActivity() {
                 Text("Edit Contact")
             }
 
-            Spacer(
-                modifier = Modifier.height(8.dp)
-            )
+            Spacer(Modifier.height(6.dp))
 
             TextButton(
                 onClick = onDelete,
@@ -1264,111 +1253,178 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun DialerScreen(
+        contacts: List<NexoraContact>,
         onCall: (String) -> Unit,
         onSms: (String) -> Unit
     ) {
+        var number by remember { mutableStateOf("") }
 
-        var number by remember {
-            mutableStateOf("")
-        }
+        val matches =
+            remember(number, contacts) {
+                if (number.isBlank()) {
+                    emptyList()
+                } else {
+                    contacts.filter { contact ->
+                        t9Matches(contact.name, number) ||
+                            contact.phones.any {
+                                normalizeNumber(it).contains(
+                                    normalizeNumber(number)
+                                )
+                            }
+                    }.take(5)
+                }
+            }
 
         val keys =
             listOf(
-                "1", "2", "3",
-                "4", "5", "6",
-                "7", "8", "9",
-                "*", "0", "#"
+                "1" to "",
+                "2" to "ABC",
+                "3" to "DEF",
+                "4" to "GHI",
+                "5" to "JKL",
+                "6" to "MNO",
+                "7" to "PQRS",
+                "8" to "TUV",
+                "9" to "WXYZ",
+                "*" to "",
+                "0" to "+",
+                "#" to ""
             )
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(
-                    horizontal = 24.dp,
-                    vertical = 20.dp
-                ),
-            horizontalAlignment =
-                Alignment.CenterHorizontally
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-
             Text(
-                text = "Dial Pad",
-                style =
-                    MaterialTheme.typography
-                        .headlineMedium,
-                fontWeight =
-                    FontWeight.Bold
+                text = "Dialer",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
             )
 
-            Spacer(
-                modifier = Modifier.height(20.dp)
-            )
+            Spacer(Modifier.height(8.dp))
 
             Text(
                 text =
                     if (number.isBlank()) {
-                        "Enter number"
+                        "Enter number or search contact"
                     } else {
                         number
                     },
-                style =
-                    MaterialTheme.typography
-                        .headlineSmall,
-                textAlign =
-                    TextAlign.Center,
-                modifier =
-                    Modifier.fillMaxWidth()
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
 
-            Spacer(
-                modifier = Modifier.height(20.dp)
-            )
+            if (matches.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(150.dp)
+                ) {
+                    items(
+                        matches,
+                        key = { it.id }
+                    ) { contact ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    number =
+                                        contact.phones.firstOrNull()
+                                            ?: number
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        MaterialTheme.colorScheme
+                                            .secondaryContainer
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text =
+                                        contact.name
+                                            .firstOrNull()
+                                            ?.uppercase()
+                                            ?: "?"
+                                )
+                            }
+
+                            Spacer(Modifier.width(10.dp))
+
+                            Column {
+                                Text(
+                                    text = contact.name,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+
+                                Text(
+                                    text = contact.phones.firstOrNull() ?: ""
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Spacer(Modifier.height(8.dp))
+            }
 
             keys.chunked(3).forEach { row ->
-
                 Row(
-                    modifier =
-                        Modifier.fillMaxWidth(),
-                    horizontalArrangement =
-                        Arrangement.SpaceEvenly
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-
-                    row.forEach { key ->
-
+                    row.forEach { (key, letters) ->
                         Button(
                             onClick = {
                                 number += key
                             },
-                            modifier =
-                                Modifier
-                                    .size(78.dp)
+                            modifier = Modifier.size(82.dp),
+                            shape = CircleShape
                         ) {
-                            Text(
-                                text = key,
-                                style =
-                                    MaterialTheme
-                                        .typography
-                                        .titleLarge
-                            )
+                            Column(
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = key,
+                                    style =
+                                        MaterialTheme.typography
+                                            .titleLarge
+                                )
+
+                                if (letters.isNotBlank()) {
+                                    Text(
+                                        text = letters,
+                                        style =
+                                            MaterialTheme.typography
+                                                .labelSmall
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
-                Spacer(
-                    modifier = Modifier.height(10.dp)
-                )
+                Spacer(Modifier.height(8.dp))
             }
 
             Row(
-                horizontalArrangement =
-                    Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-
                 OutlinedButton(
                     onClick = {
                         if (number.isNotEmpty()) {
-                            number =
-                                number.dropLast(1)
+                            number = number.dropLast(1)
                         }
                     }
                 ) {
@@ -1398,52 +1454,76 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun t9Matches(
+        name: String,
+        input: String
+    ): Boolean {
+        val digits = input.filter { it.isDigit() }
+
+        if (digits.isBlank()) {
+            return false
+        }
+
+        val normalizedName =
+            name.uppercase(Locale.getDefault())
+                .filter { it.isLetterOrDigit() }
+
+        val t9 =
+            normalizedName.map { char ->
+                when (char) {
+                    in 'A'..'C' -> '2'
+                    in 'D'..'F' -> '3'
+                    in 'G'..'I' -> '4'
+                    in 'J'..'L' -> '5'
+                    in 'M'..'O' -> '6'
+                    in 'P'..'S' -> '7'
+                    in 'T'..'V' -> '8'
+                    in 'W'..'Z' -> '9'
+                    else -> char
+                }
+            }.joinToString("")
+
+        return t9.contains(digits)
+    }
+
     @Composable
     private fun RecentsScreen(
         calls: List<NexoraCall>,
         onCall: (String) -> Unit
     ) {
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(20.dp)
         ) {
-
             Text(
                 text = "Recent Calls",
-                style =
-                    MaterialTheme.typography
-                        .headlineMedium,
-                fontWeight =
-                    FontWeight.Bold
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
             )
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = "Latest ${calls.size} calls",
+                style = MaterialTheme.typography.bodyMedium
             )
+
+            Spacer(Modifier.height(14.dp))
 
             if (calls.isEmpty()) {
-
                 EmptyState(
                     title = "No recent calls",
-                    message =
-                        "Your recent phone calls will appear here."
+                    message = "Your recent phone calls will appear here."
                 )
-
             } else {
-
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
-
                     items(
                         calls,
-                        key = {
-                            it.id
-                        }
+                        key = { it.id }
                     ) { call ->
-
                         RecentCallRow(
                             call = call,
                             onCall = {
@@ -1461,86 +1541,63 @@ class MainActivity : ComponentActivity() {
         call: NexoraCall,
         onCall: () -> Unit
     ) {
-
         val callType =
             when (call.type) {
-                CallLog.Calls.INCOMING_TYPE ->
-                    "Incoming"
-
-                CallLog.Calls.OUTGOING_TYPE ->
-                    "Outgoing"
-
-                CallLog.Calls.MISSED_TYPE ->
-                    "Missed"
-
-                CallLog.Calls.REJECTED_TYPE ->
-                    "Rejected"
-
-                else ->
-                    "Call"
+                CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                CallLog.Calls.MISSED_TYPE -> "Missed"
+                CallLog.Calls.REJECTED_TYPE -> "Rejected"
+                else -> "Call"
             }
 
         val dateText =
             SimpleDateFormat(
                 "dd MMM, hh:mm a",
                 Locale.getDefault()
-            ).format(
-                Date(call.date)
-            )
+            ).format(Date(call.date))
 
-        Row(
+        Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(
-                    vertical = 12.dp
-                ),
-            verticalAlignment =
-                Alignment.CenterVertically
+                .padding(vertical = 5.dp),
+            shape = RoundedCornerShape(16.dp)
         ) {
-
-            Column(
-                modifier =
-                    Modifier.weight(1f)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text =
+                            if (call.name.isBlank()) {
+                                call.number
+                            } else {
+                                call.name
+                            },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
 
-                Text(
-                    text =
-                        if (call.name.isBlank()) {
-                            call.number
-                        } else {
-                            call.name
-                        },
-                    style =
-                        MaterialTheme.typography
-                            .titleMedium,
-                    fontWeight =
-                        FontWeight.SemiBold
-                )
+                    Text(
+                        text = call.number,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
 
-                Text(
-                    text = call.number,
-                    style =
-                        MaterialTheme.typography
-                            .bodyMedium
-                )
+                    Text(
+                        text = "$callType â¢ $dateText",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
 
-                Text(
-                    text =
-                        "$callType • $dateText",
-                    style =
-                        MaterialTheme.typography
-                            .bodySmall
-                )
-            }
-
-            OutlinedButton(
-                onClick = onCall
-            ) {
-                Text("Call")
+                OutlinedButton(onClick = onCall) {
+                    Text("Call")
+                }
             }
         }
-
-        Divider()
     }
 
     @Composable
@@ -1548,32 +1605,22 @@ class MainActivity : ComponentActivity() {
         title: String,
         message: String
     ) {
-
         Column(
             modifier = Modifier.fillMaxSize(),
-            horizontalAlignment =
-                Alignment.CenterHorizontally,
-            verticalArrangement =
-                Arrangement.Center
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-
             Text(
                 text = title,
-                style =
-                    MaterialTheme.typography
-                        .titleLarge,
-                fontWeight =
-                    FontWeight.Bold
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
             )
 
-            Spacer(
-                modifier = Modifier.height(8.dp)
-            )
+            Spacer(Modifier.height(8.dp))
 
             Text(
                 text = message,
-                textAlign =
-                    TextAlign.Center
+                textAlign = TextAlign.Center
             )
         }
     }
@@ -1583,68 +1630,45 @@ class MainActivity : ComponentActivity() {
         currentTab: NexoraTab,
         onTabSelected: (NexoraTab) -> Unit
     ) {
-
         Surface(
-            tonalElevation = 4.dp
+            tonalElevation = 5.dp
         ) {
-
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(
-                        horizontal = 8.dp,
-                        vertical = 8.dp
-                    ),
-                horizontalArrangement =
-                    Arrangement.SpaceEvenly
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-
                 BottomItem(
                     title = "Contacts",
-                    selected =
-                        currentTab ==
-                            NexoraTab.CONTACTS,
+                    selected = currentTab == NexoraTab.CONTACTS,
                     onClick = {
-                        onTabSelected(
-                            NexoraTab.CONTACTS
-                        )
+                        onTabSelected(NexoraTab.CONTACTS)
                     }
                 )
 
                 BottomItem(
                     title = "Favorites",
-                    selected =
-                        currentTab ==
-                            NexoraTab.FAVORITES,
+                    selected = currentTab == NexoraTab.FAVORITES,
                     onClick = {
-                        onTabSelected(
-                            NexoraTab.FAVORITES
-                        )
+                        onTabSelected(NexoraTab.FAVORITES)
                     }
                 )
 
                 BottomItem(
                     title = "Dialer",
-                    selected =
-                        currentTab ==
-                            NexoraTab.DIALER,
+                    selected = currentTab == NexoraTab.DIALER,
                     onClick = {
-                        onTabSelected(
-                            NexoraTab.DIALER
-                        )
+                        onTabSelected(NexoraTab.DIALER)
                     }
                 )
 
                 BottomItem(
                     title = "Recents",
-                    selected =
-                        currentTab ==
-                            NexoraTab.RECENTS,
+                    selected = currentTab == NexoraTab.RECENTS,
                     onClick = {
-                        onTabSelected(
-                            NexoraTab.RECENTS
-                        )
+                        onTabSelected(NexoraTab.RECENTS)
                     }
                 )
             }
@@ -1657,11 +1681,7 @@ class MainActivity : ComponentActivity() {
         selected: Boolean,
         onClick: () -> Unit
     ) {
-
-        TextButton(
-            onClick = onClick
-        ) {
-
+        TextButton(onClick = onClick) {
             Text(
                 text = title,
                 fontWeight =
@@ -1680,7 +1700,6 @@ private fun NexoraTheme(
     darkTheme: Boolean,
     content: @Composable () -> Unit
 ) {
-
     MaterialTheme(
         colorScheme =
             if (darkTheme) {
