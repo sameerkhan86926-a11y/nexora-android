@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -69,10 +71,10 @@ data class NexoraCall(
 )
 
 enum class NexoraTab {
-    CONTACTS,
-    FAVORITES,
     DIALER,
     RECENTS,
+    CONTACTS,
+    FAVORITES,
     INTELLIGENCE
 }
 
@@ -91,7 +93,7 @@ class MainActivity : ComponentActivity() {
     private val contactsState = mutableStateOf<List<NexoraContact>>(emptyList())
     private val callsState = mutableStateOf<List<NexoraCall>>(emptyList())
     private val selectedContactState = mutableStateOf<NexoraContact?>(null)
-    private val currentTabState = mutableStateOf(NexoraTab.DIALER) // default polished dialer
+    private val currentTabState = mutableStateOf(NexoraTab.DIALER)
     private val darkModeState = mutableStateOf(false)
     private val isAppUnlockedState = mutableStateOf(false)
     private val activeInCallState = mutableStateOf<String?>(null)
@@ -377,13 +379,12 @@ class MainActivity : ComponentActivity() {
         return try {
             val decoded = String(Base64.decode(encoded, Base64.DEFAULT), StandardCharsets.UTF_8)
             val jsonArray = JSONArray(decoded)
-            "Restored ${jsonArray.length()} contacts into cache!"
+            "Restored ${jsonArray.length()} contacts!"
         } catch (e: Exception) {
             "Decryption failed"
         }
     }
 
-    // --- COMPOSABLE APP SHELL ---
     @Composable
     private fun NexoraApp() {
         val selectedContact = selectedContactState.value
@@ -417,15 +418,6 @@ class MainActivity : ComponentActivity() {
         ) { padding ->
             Surface(modifier = Modifier.fillMaxSize().padding(padding)) {
                 when (currentTabState.value) {
-                    NexoraTab.CONTACTS -> ContactsScreen(
-                        contacts = contactsState.value,
-                        calls = callsState.value,
-                        onContactClick = { selectedContactState.value = it }
-                    )
-                    NexoraTab.FAVORITES -> FavoritesScreen(
-                        contacts = contactsState.value.filter { it.starred },
-                        onContactClick = { selectedContactState.value = it }
-                    )
                     NexoraTab.DIALER -> ModernDialerScreen(
                         contacts = contactsState.value,
                         onCall = { makeCall(it) },
@@ -437,25 +429,233 @@ class MainActivity : ComponentActivity() {
                         onToggleBlock = { toggleBlockNumber(it); loadRecentCalls() },
                         isBlocked = { isSpamNumber(it) }
                     )
+                    NexoraTab.CONTACTS -> ContactsScreen(
+                        contacts = contactsState.value,
+                        calls = callsState.value,
+                        onContactClick = { selectedContactState.value = it }
+                    )
+                    NexoraTab.FAVORITES -> FavoritesScreen(
+                        contacts = contactsState.value.filter { it.starred },
+                        onContactClick = { selectedContactState.value = it }
+                    )
                     NexoraTab.INTELLIGENCE -> IntelligenceScreen(
                         contacts = contactsState.value,
                         calls = callsState.value,
                         onExport = { exportContactsBackup() },
                         onRestore = { restoreContactsBackup() },
                         hasActivePin = !prefs.getString("security_pin", null).isNullOrBlank(),
-                        onSavePin = { pin ->
-                            prefs.edit().putString("security_pin", pin).apply()
-                        },
-                        onRemovePin = {
-                            prefs.edit().remove("security_pin").apply()
-                        }
+                        onSavePin = { pin -> prefs.edit().putString("security_pin", pin).apply() },
+                        onRemovePin = { prefs.edit().remove("security_pin").apply() }
                     )
                 }
             }
         }
     }
 
-    // --- SCREEN: MODERN HIGH-END DIALER ---
+    // --- PHOTO MATCHING IN-CALL SCREEN ---
+    @Composable
+    private fun InCallScreen(number: String, contactName: String, onEndCall: () -> Unit) {
+        var isRecording by remember { mutableStateOf(false) }
+        var isMuted by remember { mutableStateOf(false) }
+        var isOnHold by remember { mutableStateOf(false) }
+        var isSpeaker by remember { mutableStateOf(false) }
+        var callSeconds by remember { mutableStateOf(0) }
+
+        // Live Call Timer
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000L)
+                callSeconds++
+            }
+        }
+
+        val formattedDuration = String.format(Locale.getDefault(), "%02d:%02d", callSeconds / 60, callSeconds % 60)
+
+        Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF111315)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 28.dp, vertical = 40.dp)
+                    .navigationBarsPadding(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Top Header: Contact Details & Timer
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 28.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(86.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF23272B)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Person, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(52.dp))
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        text = if (contactName.isNotBlank() && contactName != number) contactName else number,
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(text = if (contactName != number) number else "Calling...", color = Color.Gray, fontSize = 16.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = if (isOnHold) "Call on Hold" else formattedDuration,
+                        color = if (isOnHold) Color(0xFFFFB74D) else Color(0xFF81C784),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Middle 6-Button Grid (Exact match from photo)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    // Row 1
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                        InCallGridButton(
+                            icon = Icons.Default.GraphicEq,
+                            label = if (isRecording) "Recording..." else "Start recording",
+                            isActive = isRecording,
+                            onClick = { isRecording = !isRecording }
+                        )
+                        InCallGridButton(
+                            icon = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                            label = if (isMuted) "Unmute" else "Mute",
+                            isActive = isMuted,
+                            onClick = { isMuted = !isMuted }
+                        )
+                        InCallGridButton(
+                            icon = Icons.Default.Add,
+                            label = "Add call",
+                            isActive = false,
+                            onClick = { }
+                        )
+                    }
+
+                    // Row 2
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                        InCallGridButton(
+                            icon = Icons.Default.Videocam,
+                            label = "Video call",
+                            isActive = false,
+                            onClick = { }
+                        )
+                        InCallGridButton(
+                            icon = Icons.Default.Pause,
+                            label = if (isOnHold) "Unhold" else "Hold",
+                            isActive = isOnHold,
+                            onClick = { isOnHold = !isOnHold }
+                        )
+                        InCallGridButton(
+                            icon = Icons.Default.Contacts,
+                            label = "Contacts",
+                            isActive = false,
+                            onClick = { }
+                        )
+                    }
+                }
+
+                // Bottom Action Controls: Speaker, End Call, Keypad
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceAround,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Speaker Button
+                    FilledIconButton(
+                        onClick = { isSpeaker = !isSpeaker },
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = if (isSpeaker) Color.White else Color(0xFF23272B)
+                        ),
+                        modifier = Modifier.size(60.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VolumeUp,
+                            contentDescription = "Speaker",
+                            tint = if (isSpeaker) Color.Black else Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    // End Call Button (Center Big Red)
+                    FilledIconButton(
+                        onClick = onEndCall,
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFFEA4335)),
+                        modifier = Modifier.size(76.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CallEnd,
+                            contentDescription = "End Call",
+                            tint = Color.White,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+
+                    // Dialpad Button
+                    FilledIconButton(
+                        onClick = { },
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF23272B)),
+                        modifier = Modifier.size(60.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Dialpad,
+                            contentDescription = "Keypad",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun InCallGridButton(
+        icon: ImageVector,
+        label: String,
+        isActive: Boolean,
+        onClick: () -> Unit
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .width(90.dp)
+                .clickable(onClick = onClick)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(if (isActive) Color.White else Color.Transparent),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = if (isActive) Color.Black else Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = label,
+                color = if (isActive) Color(0xFF81C784) else Color(0xFFD0D0D0),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+
+    // --- REFINED HIGH-END DIALER ---
     @Composable
     private fun ModernDialerScreen(
         contacts: List<NexoraContact>,
@@ -494,7 +694,6 @@ class MainActivity : ComponentActivity() {
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.Bottom
         ) {
-            // Live Search Matches list if user is typing
             if (matches.isNotEmpty()) {
                 LazyColumn(
                     modifier = Modifier
@@ -508,12 +707,12 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable { dialText = c.phones.firstOrNull() ?: dialText }
-                                .padding(vertical = 10.dp, horizontal = 12.dp),
+                                .padding(vertical = 8.dp, horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(42.dp)
+                                    .size(40.dp)
                                     .clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.primaryContainer),
                                 contentAlignment = Alignment.Center
@@ -526,7 +725,7 @@ class MainActivity : ComponentActivity() {
                             }
                             Spacer(Modifier.width(12.dp))
                             Column {
-                                Text(c.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                                Text(c.name, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                                 Text(c.phones.firstOrNull() ?: "", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
@@ -536,11 +735,10 @@ class MainActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.weight(1f))
             }
 
-            // Dialed Number Display
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 20.dp),
+                    .padding(bottom = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
@@ -564,19 +762,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Keypad Grid
             dialpadKeys.chunked(3).forEach { row ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 5.dp),
+                        .padding(vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     row.forEach { (digit, letters, _) ->
                         Surface(
                             onClick = { dialText += digit },
                             shape = CircleShape,
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                             modifier = Modifier.size(76.dp)
                         ) {
                             Column(
@@ -607,7 +804,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(14.dp))
 
-            // Action Buttons Row: SMS / Call / Backspace
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -615,7 +811,6 @@ class MainActivity : ComponentActivity() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // SMS Button
                 IconButton(
                     onClick = { if (dialText.isNotBlank()) onSms(dialText) },
                     modifier = Modifier.size(54.dp)
@@ -630,24 +825,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Call Floating Action Button
                 FilledIconButton(
                     onClick = { if (dialText.isNotBlank()) onCall(dialText) },
                     shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = Color(0xFF2E7D32)
-                    ),
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF2E7D32)),
                     modifier = Modifier.size(72.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Call",
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
+                    Icon(imageVector = Icons.Default.Call, contentDescription = "Call", tint = Color.White, modifier = Modifier.size(32.dp))
                 }
 
-                // Backspace Button
                 IconButton(
                     onClick = { if (dialText.isNotEmpty()) dialText = dialText.dropLast(1) },
                     modifier = Modifier.size(54.dp)
@@ -662,7 +848,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
         }
     }
 
@@ -903,7 +1089,6 @@ class MainActivity : ComponentActivity() {
             Text("Security & Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
 
-            // App Lock Card with Enable / Disable controls
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -974,7 +1159,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(16.dp))
 
-            // Analytics & Backup
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Encrypted Backup & Recovery", fontWeight = FontWeight.Bold)
@@ -997,50 +1181,6 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = 10.dp)
                 )
-            }
-        }
-    }
-
-    // --- OVERLAY: ACTIVE IN-CALL ---
-    @Composable
-    private fun InCallScreen(number: String, contactName: String, onEndCall: () -> Unit) {
-        var isMuted by remember { mutableStateOf(false) }
-        var isSpeaker by remember { mutableStateOf(false) }
-
-        Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF121212)) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 48.dp)) {
-                    Box(modifier = Modifier.size(90.dp).clip(CircleShape).background(Color.DarkGray), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Person, contentDescription = null, tint = Color.White, modifier = Modifier.size(50.dp))
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Text(contactName, color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                    Text(number, color = Color.Gray, fontSize = 16.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Ongoing Call...", color = Color.Green, fontSize = 14.sp)
-                }
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    IconButton(onClick = { isMuted = !isMuted }) {
-                        Icon(if (isMuted) Icons.Default.MicOff else Icons.Default.Mic, contentDescription = null, tint = Color.White)
-                    }
-                    IconButton(onClick = { isSpeaker = !isSpeaker }) {
-                        Icon(Icons.Default.VolumeUp, contentDescription = null, tint = if (isSpeaker) Color.Green else Color.White)
-                    }
-                }
-
-                FloatingActionButton(
-                    onClick = onEndCall,
-                    containerColor = Color.Red,
-                    shape = CircleShape,
-                    modifier = Modifier.size(72.dp)
-                ) {
-                    Icon(Icons.Default.CallEnd, contentDescription = null, tint = Color.White, modifier = Modifier.size(36.dp))
-                }
             }
         }
     }
@@ -1118,7 +1258,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- THEME ---
 @Composable
 private fun NexoraTheme(darkTheme: Boolean, content: @Composable () -> Unit) {
     MaterialTheme(
