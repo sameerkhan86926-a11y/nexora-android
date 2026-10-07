@@ -14,6 +14,7 @@ import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.Call
 import android.telecom.CallAudioState
+import android.telecom.InCallService
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.view.WindowManager
@@ -29,7 +30,6 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,6 +53,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -62,8 +63,62 @@ import java.text.SimpleDateFormat
 import java.util.*
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+
+// --- TELECOM SERVICE IN-APP ENGINE ---
+class NexoraInCallService : InCallService() {
+    companion object {
+        val currentCall = MutableStateFlow<Call?>(null)
+        val callAudioStateFlow = MutableStateFlow<CallAudioState?>(null)
+        private var instance: NexoraInCallService? = null
+
+        fun answerCall() { currentCall.value?.answer(0) }
+        fun rejectCall() { currentCall.value?.reject(false, null) }
+        fun disconnectCall() { currentCall.value?.disconnect() }
+        fun setMuted(muted: Boolean) { instance?.setMuted(muted) }
+        fun toggleSpeaker(enable: Boolean) {
+            val route = if (enable) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_EARPIECE
+            instance?.setAudioRoute(route)
+        }
+        fun holdCall(hold: Boolean) {
+            if (hold) currentCall.value?.hold() else currentCall.value?.unhold()
+        }
+    }
+
+    private val callback = object : Call.Callback() {
+        override fun onStateChanged(call: Call?, state: Int) {
+            if (state == Call.STATE_DISCONNECTED) {
+                currentCall.value = null
+            }
+        }
+    }
+
+    override fun onCallAdded(call: Call?) {
+        super.onCallAdded(call)
+        instance = this
+        currentCall.value = call
+        call?.registerCallback(callback)
+    }
+
+    override fun onCallRemoved(call: Call?) {
+        super.onCallRemoved(call)
+        call?.unregisterCallback(callback)
+        if (currentCall.value == call) {
+            currentCall.value = null
+        }
+    }
+
+    override fun onCallAudioStateChanged(audioState: CallAudioState?) {
+        super.onCallAudioStateChanged(audioState)
+        callAudioStateFlow.value = audioState
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+        currentCall.value = null
+    }
+}
 
 val IosBlue = Color(0xFF007AFF)
 val IosGreen = Color(0xFF34C759)
@@ -110,9 +165,7 @@ class MainActivity : ComponentActivity() {
     private val showAddContactDialog = mutableStateOf(false)
     private val editingContactState = mutableStateOf<NexoraContact?>(null)
 
-    // Theme state: "system", "dark", "light"
     private val themePreference = mutableStateOf("system")
-
     private val prefs by lazy { getSharedPreferences("nexora_prefs", Context.MODE_PRIVATE) }
     private val KEY_ALIAS = "NexoraAESKey"
 
@@ -134,7 +187,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Screenshot & Screen Recording Protection
         if (prefs.getBoolean("secure_screen", false)) {
             window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         }
@@ -222,7 +274,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- CONTACT OPERATIONS ---
     private fun loadContacts() {
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) return
 
@@ -389,7 +440,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- CALL LOG OPERATIONS ---
     private fun loadRecentCalls() {
         if (!hasPermission(Manifest.permission.READ_CALL_LOG)) return
 
@@ -461,7 +511,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- DUAL SIM & TELECOM CALLING ---
     private fun getAvailableSimAccounts(): List<PhoneAccountHandle> {
         val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager ?: return emptyList()
         return if (hasPermission(Manifest.permission.READ_PHONE_STATE)) {
@@ -484,7 +533,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- T9 TEXT CONVERTER ---
     private fun getT9Representation(name: String): String {
         return name.uppercase().map { ch ->
             when (ch) {
@@ -501,7 +549,6 @@ class MainActivity : ComponentActivity() {
         }.joinToString("")
     }
 
-    // --- HARDWARE KEYSTORE AES-256 ENCRYPTION ---
     private fun initKeyStore() {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (!keyStore.containsAlias(KEY_ALIAS)) {
@@ -545,7 +592,7 @@ class MainActivity : ComponentActivity() {
 
     private fun restoreEncryptedBackup(): String {
         val payload = prefs.getString("aes_backup_store", null) ?: return "No backup found!"
-        try {
+        return try {
             val allBytes = android.util.Base64.decode(payload, android.util.Base64.NO_WRAP)
             val iv = allBytes.copyOfRange(0, 12)
             val cipherText = allBytes.copyOfRange(12, allBytes.size)
@@ -558,9 +605,9 @@ class MainActivity : ComponentActivity() {
             val plainBytes = cipher.doFinal(cipherText)
             val json = JSONArray(String(plainBytes, Charsets.UTF_8))
 
-            return "Restored ${json.length()} contacts from Secure Enclave"
+            "Restored ${json.length()} contacts from Secure Enclave"
         } catch (e: Exception) {
-            return "Decryption Error: ${e.message}"
+            "Decryption Error: ${e.message}"
         }
     }
 
@@ -592,7 +639,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- UI SCAFFOLD ---
     @Composable
     private fun IosAppScaffold() {
         val selected = selectedContactState.value
@@ -688,7 +734,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 1: DIALER + T9 SEARCH + DUAL SIM ---
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun IosKeypadScreen(
@@ -701,7 +746,6 @@ class MainActivity : ComponentActivity() {
         var dialedNumber by remember { mutableStateOf("") }
         var selectedSimIndex by remember { mutableIntStateOf(0) }
 
-        // T9 Matching Logic
         val matchedContacts = remember(dialedNumber, contacts) {
             if (dialedNumber.isBlank()) emptyList()
             else {
@@ -735,7 +779,6 @@ class MainActivity : ComponentActivity() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Bottom
         ) {
-            // T9 Matches Carousel
             if (matchedContacts.isNotEmpty()) {
                 LazyColumn(modifier = Modifier.fillMaxWidth().height(110.dp)) {
                     items(matchedContacts) { c ->
@@ -759,7 +802,6 @@ class MainActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.weight(1f))
             }
 
-            // Dialed Text Display
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 12.dp)) {
                 Text(
                     text = dialedNumber,
@@ -778,7 +820,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Dual SIM Toggle Strip
             if (simAccounts.size > 1) {
                 Row(
                     modifier = Modifier.padding(bottom = 8.dp),
@@ -794,7 +835,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Keypad Grid
             keys.chunked(3).forEach { row ->
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                     row.forEach { (digit, letters, _) ->
@@ -822,7 +862,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(10.dp))
 
-            // Action Row
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 24.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -851,7 +890,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 2: RECENTS WITH DELETE ---
     @Composable
     private fun IosRecentsScreen(
         calls: List<NexoraCall>,
@@ -905,7 +943,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 3: CONTACTS ---
     @Composable
     private fun IosContactsScreen(
         contacts: List<NexoraContact>,
@@ -960,7 +997,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 4: FAVORITES ---
     @Composable
     private fun IosFavoritesScreen(contacts: List<NexoraContact>, onContactClick: (NexoraContact) -> Unit, onCall: (String) -> Unit) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -986,7 +1022,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 5: SETTINGS, CALL STATS & SECURITY ---
     @Composable
     private fun IosSettingsScreen(
         contacts: List<NexoraContact>,
@@ -1013,7 +1048,6 @@ class MainActivity : ComponentActivity() {
             Text("Settings & Intelligence", fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
 
-            // Call Analytics Intelligence Card
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text("Call Intelligence & Analytics", fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -1025,7 +1059,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(12.dp))
 
-            // Theme Setting
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text("Appearance Theme", fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -1039,7 +1072,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(12.dp))
 
-            // Hardware Keystore AES-256 Card
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text("Hardware Keystore AES-256 Backup", fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -1056,7 +1088,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(12.dp))
 
-            // Screen Security Toggle (Anti-Screenshot)
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                 Row(modifier = Modifier.padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
@@ -1073,7 +1104,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- REAL TELECOM IN-CALL OVERLAY SCREEN ---
     @Composable
     private fun RealInCallScreen(call: Call) {
         val callState = call.state
@@ -1115,7 +1145,6 @@ class MainActivity : ComponentActivity() {
                     Text(stateText, color = Color.Gray, fontSize = 18.sp)
                 }
 
-                // If Ringing -> Answer / Reject Buttons
                 if (callState == Call.STATE_RINGING) {
                     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         FilledIconButton(
@@ -1136,7 +1165,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 } else {
-                    // Active Call Control Grid
                     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(28.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
                             IosCallCircleBtn(
@@ -1160,7 +1188,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // End Call
                     FilledIconButton(
                         onClick = { NexoraInCallService.disconnectCall() },
                         shape = CircleShape,
@@ -1192,7 +1219,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- CONTACT DETAIL & CRUD SHEET ---
     @Composable
     private fun IosContactDetailScreen(
         contact: NexoraContact,
@@ -1283,7 +1309,6 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    // --- LOCK SCREEN PASSCODE ---
     @Composable
     private fun IosPasscodeScreen(correctPin: String, onUnlocked: () -> Unit) {
         var enteredPin by remember { mutableStateOf("") }
@@ -1341,7 +1366,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- BOTTOM NAVIGATION BAR ---
     @Composable
     private fun IosBottomNavigationBar(currentTab: NexoraTab, onTabSelected: (NexoraTab) -> Unit) {
         NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
@@ -1384,7 +1408,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- THEME ---
 @Composable
 private fun NexoraIosTheme(darkTheme: Boolean, content: @Composable () -> Unit) {
     MaterialTheme(
