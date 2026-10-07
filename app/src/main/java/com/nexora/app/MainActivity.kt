@@ -12,7 +12,11 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.telecom.Call
+import android.telecom.CallAudioState
+import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,8 +24,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -39,10 +44,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,27 +55,29 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.KeyStore
 import java.text.SimpleDateFormat
 import java.util.*
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
-// --- iOS COLOR PALETTE ---
 val IosBlue = Color(0xFF007AFF)
 val IosGreen = Color(0xFF34C759)
 val IosRed = Color(0xFFFF3B30)
 val IosOrange = Color(0xFFFF9500)
-val IosDarkBackground = Color(0xFF000000)
-val IosDarkCard = Color(0xFF1C1C1E)
-val IosLightCard = Color(0xFFF2F2F7)
-val IosKeypadLight = Color(0xFFE5E5EA)
-val IosKeypadDark = Color(0xFF2C2C2E)
 val IosGrayText = Color(0xFF8E8E93)
 
 data class NexoraContact(
     val id: String,
     val name: String,
     val phones: List<String>,
+    val email: String = "",
+    val company: String = "",
+    val photoUri: String? = null,
     val starred: Boolean,
     val group: String = "General",
     val isTemporary: Boolean = false
@@ -102,10 +107,14 @@ class MainActivity : ComponentActivity() {
     private val selectedContactState = mutableStateOf<NexoraContact?>(null)
     private val currentTabState = mutableStateOf(NexoraTab.DIALER)
     private val isAppUnlockedState = mutableStateOf(false)
-    private val activeInCallState = mutableStateOf<String?>(null)
     private val showAddContactDialog = mutableStateOf(false)
+    private val editingContactState = mutableStateOf<NexoraContact?>(null)
+
+    // Theme state: "system", "dark", "light"
+    private val themePreference = mutableStateOf("system")
 
     private val prefs by lazy { getSharedPreferences("nexora_prefs", Context.MODE_PRIVATE) }
+    private val KEY_ALIAS = "NexoraAESKey"
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -125,32 +134,53 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Screenshot & Screen Recording Protection
+        if (prefs.getBoolean("secure_screen", false)) {
+            window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        }
+
+        themePreference.value = prefs.getString("theme_mode", "system") ?: "system"
         val savedPin = prefs.getString("security_pin", null)
         isAppUnlockedState.value = savedPin.isNullOrBlank()
 
+        initKeyStore()
+
         setContent {
-            NexoraIosTheme {
+            val isDark = when (themePreference.value) {
+                "dark" -> true
+                "light" -> false
+                else -> isSystemInDarkTheme()
+            }
+
+            NexoraIosTheme(darkTheme = isDark) {
+                val activeTelecomCall by NexoraInCallService.currentCall.collectAsState()
+
                 if (!isAppUnlockedState.value) {
                     IosPasscodeScreen(
                         correctPin = savedPin ?: "",
                         onUnlocked = { isAppUnlockedState.value = true }
                     )
-                } else if (activeInCallState.value != null) {
-                    IosInCallScreen(
-                        number = activeInCallState.value!!,
-                        contactName = findContactName(activeInCallState.value!!),
-                        onEndCall = { activeInCallState.value = null }
-                    )
+                } else if (activeTelecomCall != null) {
+                    RealInCallScreen(call = activeTelecomCall!!)
                 } else {
                     IosAppScaffold()
                 }
 
                 if (showAddContactDialog.value) {
-                    IosAddContactSheet(
-                        onDismiss = { showAddContactDialog.value = false },
-                        onSave = { name, phone, group ->
-                            saveNewContact(name, phone, group)
+                    IosContactEditSheet(
+                        contact = editingContactState.value,
+                        onDismiss = {
                             showAddContactDialog.value = false
+                            editingContactState.value = null
+                        },
+                        onSave = { name, phone, email, company, group ->
+                            if (editingContactState.value != null) {
+                                updateContact(editingContactState.value!!.id, name, phone, email, company, group)
+                            } else {
+                                saveNewContact(name, phone, email, company, group)
+                            }
+                            showAddContactDialog.value = false
+                            editingContactState.value = null
                         }
                     )
                 }
@@ -172,18 +202,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestInitialPermissions() {
-        val permissions = mutableListOf<String>()
-        if (!hasPermission(Manifest.permission.READ_CONTACTS)) permissions.add(Manifest.permission.READ_CONTACTS)
-        if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) permissions.add(Manifest.permission.WRITE_CONTACTS)
-        if (!hasPermission(Manifest.permission.READ_CALL_LOG)) permissions.add(Manifest.permission.READ_CALL_LOG)
-        if (!hasPermission(Manifest.permission.CALL_PHONE)) permissions.add(Manifest.permission.CALL_PHONE)
-
-        if (permissions.isNotEmpty()) {
-            permissionLauncher.launch(permissions.toTypedArray())
-        } else {
-            loadContacts()
-            loadRecentCalls()
-        }
+        val permissions = mutableListOf(
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS,
+            Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.WRITE_CALL_LOG,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_PHONE_STATE
+        )
+        permissionLauncher.launch(permissions.toTypedArray())
     }
 
     private fun promptDefaultDialer() {
@@ -192,17 +219,10 @@ class MainActivity : ComponentActivity() {
             if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_DIALER) && !roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
                 defaultDialerLauncher.launch(roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER))
             }
-        } else {
-            val telecomManager = getSystemService(TELECOM_SERVICE) as? TelecomManager
-            if (telecomManager != null && telecomManager.defaultDialerPackage != packageName) {
-                val intent = Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER).apply {
-                    putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, packageName)
-                }
-                startActivity(intent)
-            }
         }
     }
 
+    // --- CONTACT OPERATIONS ---
     private fun loadContacts() {
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) return
 
@@ -212,6 +232,7 @@ class MainActivity : ComponentActivity() {
                 ContactsContract.Contacts._ID,
                 ContactsContract.Contacts.DISPLAY_NAME,
                 ContactsContract.Contacts.STARRED,
+                ContactsContract.Contacts.PHOTO_URI,
                 ContactsContract.Contacts.HAS_PHONE_NUMBER
             )
 
@@ -225,6 +246,7 @@ class MainActivity : ComponentActivity() {
                 val idIdx = cursor.getColumnIndex(ContactsContract.Contacts._ID)
                 val nameIdx = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
                 val starIdx = cursor.getColumnIndex(ContactsContract.Contacts.STARRED)
+                val photoIdx = cursor.getColumnIndex(ContactsContract.Contacts.PHOTO_URI)
                 val phoneIdx = cursor.getColumnIndex(ContactsContract.Contacts.HAS_PHONE_NUMBER)
 
                 while (cursor.moveToNext()) {
@@ -236,6 +258,7 @@ class MainActivity : ComponentActivity() {
                     val phones = getPhoneNumbers(id)
                     if (phones.isEmpty()) continue
 
+                    val photoUri = if (photoIdx >= 0) cursor.getString(photoIdx) else null
                     val group = prefs.getString("contact_group_$id", "General") ?: "General"
                     val isTemp = prefs.getBoolean("contact_temp_$id", false)
 
@@ -244,6 +267,7 @@ class MainActivity : ComponentActivity() {
                             id = id,
                             name = name,
                             phones = phones,
+                            photoUri = photoUri,
                             starred = starIdx >= 0 && cursor.getInt(starIdx) == 1,
                             group = group,
                             isTemporary = isTemp
@@ -278,6 +302,94 @@ class MainActivity : ComponentActivity() {
         return numbers
     }
 
+    private fun saveNewContact(name: String, phoneNumber: String, email: String, company: String, group: String) {
+        if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val ops = ArrayList<ContentProviderOperation>()
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
+                        .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
+                        .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
+                        .build()
+                )
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
+                        .build()
+                )
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phoneNumber)
+                        .withValue(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+                        .build()
+                )
+                if (email.isNotBlank()) {
+                    ops.add(
+                        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                            .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE)
+                            .withValue(ContactsContract.CommonDataKinds.Email.ADDRESS, email)
+                            .build()
+                    )
+                }
+                contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Saved to Contacts", Toast.LENGTH_SHORT).show()
+                    loadContacts()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun updateContact(contactId: String, name: String, phone: String, email: String, company: String, group: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val ops = ArrayList<ContentProviderOperation>()
+                ops.add(
+                    ContentProviderOperation.newUpdate(ContactsContract.Data.CONTENT_URI)
+                        .withSelection("${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?", arrayOf(contactId, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE))
+                        .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
+                        .build()
+                )
+                ops.add(
+                    ContentProviderOperation.newUpdate(ContactsContract.Data.CONTENT_URI)
+                        .withSelection("${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?", arrayOf(contactId, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE))
+                        .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phone)
+                        .build()
+                )
+                contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Contact Updated", Toast.LENGTH_SHORT).show()
+                    loadContacts()
+                    selectedContactState.value = null
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun deleteContact(contactId: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val uri = ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, contactId.toLong())
+            contentResolver.delete(uri, null, null)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Contact Deleted", Toast.LENGTH_SHORT).show()
+                selectedContactState.value = null
+                loadContacts()
+            }
+        }
+    }
+
+    // --- CALL LOG OPERATIONS ---
     private fun loadRecentCalls() {
         if (!hasPermission(Manifest.permission.READ_CALL_LOG)) return
 
@@ -306,15 +418,14 @@ class MainActivity : ComponentActivity() {
                 val dateIdx = cursor.getColumnIndex(CallLog.Calls.DATE)
                 val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
 
-                var count = 0
-                while (cursor.moveToNext() && count < 100) {
+                while (cursor.moveToNext()) {
                     if (idIdx < 0 || numIdx < 0 || typeIdx < 0 || dateIdx < 0) continue
                     val num = cursor.getString(numIdx) ?: "Unknown"
                     val name = if (nameIdx >= 0) cursor.getString(nameIdx) ?: findContactName(num) else findContactName(num)
 
                     result.add(
                         NexoraCall(
-                            id = cursor.getString(idIdx) ?: count.toString(),
+                            id = cursor.getString(idIdx) ?: "",
                             number = num,
                             name = name,
                             type = cursor.getInt(typeIdx),
@@ -322,13 +433,134 @@ class MainActivity : ComponentActivity() {
                             duration = if (durIdx >= 0) cursor.getLong(durIdx) else 0L
                         )
                     )
-                    count++
                 }
             }
 
             withContext(Dispatchers.Main) {
                 callsState.value = result
             }
+        }
+    }
+
+    private fun deleteCallLog(callId: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            contentResolver.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(callId))
+            withContext(Dispatchers.Main) {
+                loadRecentCalls()
+            }
+        }
+    }
+
+    private fun deleteAllCallsForNumber(number: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            contentResolver.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls.NUMBER} = ?", arrayOf(number))
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Logs Cleared", Toast.LENGTH_SHORT).show()
+                loadRecentCalls()
+            }
+        }
+    }
+
+    // --- DUAL SIM & TELECOM CALLING ---
+    private fun getAvailableSimAccounts(): List<PhoneAccountHandle> {
+        val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager ?: return emptyList()
+        return if (hasPermission(Manifest.permission.READ_PHONE_STATE)) {
+            telecomManager.callCapablePhoneAccounts
+        } else emptyList()
+    }
+
+    private fun makeCallWithSim(number: String, simHandle: PhoneAccountHandle? = null) {
+        val clean = number.trim()
+        if (clean.isBlank()) return
+        val uri = Uri.parse("tel:${Uri.encode(clean)}")
+        val intent = Intent(Intent.ACTION_CALL, uri)
+        if (simHandle != null) {
+            intent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, simHandle)
+        }
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            startActivity(Intent(Intent.ACTION_DIAL, uri))
+        }
+    }
+
+    // --- T9 TEXT CONVERTER ---
+    private fun getT9Representation(name: String): String {
+        return name.uppercase().map { ch ->
+            when (ch) {
+                'A', 'B', 'C' -> '2'
+                'D', 'E', 'F' -> '3'
+                'G', 'H', 'I' -> '4'
+                'J', 'K', 'L' -> '5'
+                'M', 'N', 'O' -> '6'
+                'P', 'Q', 'R', 'S' -> '7'
+                'T', 'U', 'V' -> '8'
+                'W', 'X', 'Y', 'Z' -> '9'
+                else -> ch
+            }
+        }.joinToString("")
+    }
+
+    // --- HARDWARE KEYSTORE AES-256 ENCRYPTION ---
+    private fun initKeyStore() {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (!keyStore.containsAlias(KEY_ALIAS)) {
+            val keyGenerator = KeyGenerator.getInstance(android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            val keySpec = android.security.keystore.KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                android.security.keystore.KeyProperties.PURPOSE_ENCRYPT or android.security.keystore.KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+            keyGenerator.init(keySpec)
+            keyGenerator.generateKey()
+        }
+    }
+
+    private fun exportEncryptedBackup(): String {
+        val json = JSONArray()
+        contactsState.value.forEach { c ->
+            val obj = JSONObject()
+            obj.put("name", c.name)
+            obj.put("phones", JSONArray(c.phones))
+            obj.put("group", c.group)
+            json.put(obj)
+        }
+        val raw = json.toString().toByteArray(Charsets.UTF_8)
+
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val secretKey = (keyStore.getEntry(KEY_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+        val iv = cipher.iv
+        val encrypted = cipher.doFinal(raw)
+
+        val finalPayload = android.util.Base64.encodeToString(iv + encrypted, android.util.Base64.NO_WRAP)
+        prefs.edit().putString("aes_backup_store", finalPayload).apply()
+        return "Backup AES-256 Encrypted (${contactsState.value.size} contacts)"
+    }
+
+    private fun restoreEncryptedBackup(): String {
+        val payload = prefs.getString("aes_backup_store", null) ?: return "No backup found!"
+        try {
+            val allBytes = android.util.Base64.decode(payload, android.util.Base64.NO_WRAP)
+            val iv = allBytes.copyOfRange(0, 12)
+            val cipherText = allBytes.copyOfRange(12, allBytes.size)
+
+            val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val secretKey = (keyStore.getEntry(KEY_ALIAS, null) as KeyStore.SecretKeyEntry).secretKey
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+            val plainBytes = cipher.doFinal(cipherText)
+            val json = JSONArray(String(plainBytes, Charsets.UTF_8))
+
+            return "Restored ${json.length()} contacts from Secure Enclave"
+        } catch (e: Exception) {
+            return "Decryption Error: ${e.message}"
         }
     }
 
@@ -341,114 +573,26 @@ class MainActivity : ComponentActivity() {
         return number.filter { it.isDigit() }.takeLast(10)
     }
 
-    private fun makeCall(number: String) {
-        val clean = number.trim()
-        if (clean.isBlank()) return
-        activeInCallState.value = clean
-
-        try {
-            startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${Uri.encode(clean)}")))
-        } catch (_: Exception) {
-            try {
-                startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(clean)}")))
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun sendSms(number: String) {
-        try {
-            startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(number)}")))
-        } catch (_: Exception) {}
-    }
-
     private fun openWhatsApp(number: String) {
         val clean = normalizeNumber(number)
-        if (clean.length < 10) {
-            Toast.makeText(this, "Enter valid 10-digit number for WhatsApp", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val fullNumber = if (clean.length == 10) "91$clean" else clean
+        val full = if (clean.length == 10) "91$clean" else clean
         try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                data = Uri.parse("https://api.whatsapp.com/send?phone=$fullNumber")
-            }
-            startActivity(intent)
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://api.whatsapp.com/send?phone=$full")))
         } catch (_: Exception) {
-            Toast.makeText(this, "WhatsApp is not installed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "WhatsApp not installed", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun saveNewContact(name: String, phoneNumber: String, group: String) {
-        if (!hasPermission(Manifest.permission.WRITE_CONTACTS)) {
-            permissionLauncher.launch(arrayOf(Manifest.permission.WRITE_CONTACTS))
-            return
-        }
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val ops = ArrayList<ContentProviderOperation>()
-                ops.add(
-                    ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
-                        .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
-                        .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
-                        .build()
-                )
-                ops.add(
-                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
-                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
-                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
-                        .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
-                        .build()
-                )
-                ops.add(
-                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
-                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
-                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
-                        .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phoneNumber)
-                        .withValue(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
-                        .build()
-                )
-                contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Contact saved to iPhone Address Book", Toast.LENGTH_SHORT).show()
-                    loadContacts()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
+    private fun openTelegram(number: String) {
+        val clean = normalizeNumber(number)
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+91$clean")))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Telegram not installed", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // --- VCF EXPORT & IMPORT ---
-    private fun exportVcf(): String {
-        val contacts = contactsState.value
-        if (contacts.isEmpty()) return "No contacts to export"
-
-        val sb = StringBuilder()
-        contacts.forEach { c ->
-            sb.append("BEGIN:VCARD\nVERSION:3.0\n")
-            sb.append("FN:${c.name}\n")
-            c.phones.forEach { p ->
-                sb.append("TEL;TYPE=CELL:$p\n")
-            }
-            sb.append("END:VCARD\n")
-        }
-        prefs.edit().putString("vcf_cache_data", sb.toString()).apply()
-        return "Exported ${contacts.size} contacts as VCF (Apple vCard 3.0)"
-    }
-
-    private fun importVcf(): String {
-        val data = prefs.getString("vcf_cache_data", null) ?: return "No saved VCF file found."
-        var count = 0
-        data.lines().forEach { line ->
-            if (line.startsWith("BEGIN:VCARD")) count++
-        }
-        return "Validated $count contacts from Apple vCard store."
-    }
-
-    // --- iOS APP SHELL ---
+    // --- UI SCAFFOLD ---
     @Composable
     private fun IosAppScaffold() {
         val selected = selectedContactState.value
@@ -457,13 +601,15 @@ class MainActivity : ComponentActivity() {
             IosContactDetailScreen(
                 contact = selected,
                 onBack = { selectedContactState.value = null },
-                onCall = { makeCall(it) },
-                onSms = { sendSms(it) },
+                onCall = { makeCallWithSim(it) },
+                onSms = { startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$it"))) },
                 onWhatsApp = { openWhatsApp(it) },
-                onGroupChange = { newGroup ->
-                    prefs.edit().putString("contact_group_${selected.id}", newGroup).apply()
-                    loadContacts()
-                }
+                onTelegram = { openTelegram(it) },
+                onEdit = {
+                    editingContactState.value = selected
+                    showAddContactDialog.value = true
+                },
+                onDelete = { deleteContact(selected.id) }
             )
             return
         }
@@ -486,40 +632,55 @@ class MainActivity : ComponentActivity() {
                     NexoraTab.FAVORITES -> IosFavoritesScreen(
                         contacts = contactsState.value.filter { it.starred },
                         onContactClick = { selectedContactState.value = it },
-                        onCall = { makeCall(it) }
+                        onCall = { makeCallWithSim(it) }
                     )
                     NexoraTab.RECENTS -> IosRecentsScreen(
                         calls = callsState.value,
-                        onCall = { makeCall(it) }
+                        onCall = { makeCallWithSim(it) },
+                        onDeleteCall = { deleteCallLog(it) },
+                        onDeleteAll = { deleteAllCallsForNumber(it) }
                     )
                     NexoraTab.CONTACTS -> IosContactsScreen(
                         contacts = contactsState.value,
                         onContactClick = { selectedContactState.value = it },
-                        onAddClick = { showAddContactDialog.value = true }
+                        onAddClick = {
+                            editingContactState.value = null
+                            showAddContactDialog.value = true
+                        }
                     )
                     NexoraTab.DIALER -> IosKeypadScreen(
                         contacts = contactsState.value,
-                        onCall = { makeCall(it) },
+                        simAccounts = getAvailableSimAccounts(),
+                        onCall = { num, sim -> makeCallWithSim(num, sim) },
                         onWhatsApp = { openWhatsApp(it) },
                         onSpeedDial = { digit ->
-                            val speedNumber = prefs.getString("speed_dial_$digit", null)
-                            if (!speedNumber.isNullOrBlank()) {
-                                makeCall(speedNumber)
-                            } else {
-                                Toast.makeText(this@MainActivity, "Speed dial $digit not assigned. Long press in Settings.", Toast.LENGTH_SHORT).show()
-                            }
+                            val speed = prefs.getString("speed_dial_$digit", null)
+                            if (!speed.isNullOrBlank()) makeCallWithSim(speed)
+                            else Toast.makeText(this@MainActivity, "Assign Key $digit in Settings", Toast.LENGTH_SHORT).show()
                         }
                     )
                     NexoraTab.SETTINGS -> IosSettingsScreen(
                         contacts = contactsState.value,
-                        onExportVcf = { exportVcf() },
-                        onImportVcf = { importVcf() },
+                        calls = callsState.value,
+                        themeMode = themePreference.value,
+                        onThemeChange = { mode ->
+                            themePreference.value = mode
+                            prefs.edit().putString("theme_mode", mode).apply()
+                        },
+                        onExportAes = { exportEncryptedBackup() },
+                        onRestoreAes = { restoreEncryptedBackup() },
                         hasPin = !prefs.getString("security_pin", null).isNullOrBlank(),
                         onSetPin = { prefs.edit().putString("security_pin", it).apply() },
                         onRemovePin = { prefs.edit().remove("security_pin").apply() },
+                        isScreenSecured = prefs.getBoolean("secure_screen", false),
+                        onToggleScreenSecurity = { sec ->
+                            prefs.edit().putBoolean("secure_screen", sec).apply()
+                            if (sec) window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+                            else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        },
                         onAssignSpeedDial = { digit, num ->
                             prefs.edit().putString("speed_dial_$digit", num).apply()
-                            Toast.makeText(this@MainActivity, "Key $digit bound to $num", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Key $digit bound", Toast.LENGTH_SHORT).show()
                         }
                     )
                 }
@@ -527,23 +688,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 1: iOS KEYPAD (DIALER) ---
+    // --- TAB 1: DIALER + T9 SEARCH + DUAL SIM ---
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun IosKeypadScreen(
         contacts: List<NexoraContact>,
-        onCall: (String) -> Unit,
+        simAccounts: List<PhoneAccountHandle>,
+        onCall: (String, PhoneAccountHandle?) -> Unit,
         onWhatsApp: (String) -> Unit,
         onSpeedDial: (String) -> Unit
     ) {
         var dialedNumber by remember { mutableStateOf("") }
+        var selectedSimIndex by remember { mutableIntStateOf(0) }
 
-        val matchedContact = remember(dialedNumber, contacts) {
-            if (dialedNumber.length >= 3) {
-                contacts.firstOrNull { c ->
-                    c.phones.any { normalizeNumber(it).contains(normalizeNumber(dialedNumber)) }
-                }
-            } else null
+        // T9 Matching Logic
+        val matchedContacts = remember(dialedNumber, contacts) {
+            if (dialedNumber.isBlank()) emptyList()
+            else {
+                contacts.filter { c ->
+                    c.phones.any { normalizeNumber(it).contains(dialedNumber) } ||
+                        getT9Representation(c.name).contains(dialedNumber)
+                }.take(3)
+            }
         }
 
         val keys = listOf(
@@ -569,79 +735,72 @@ class MainActivity : ComponentActivity() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Bottom
         ) {
-            // Live Matched Contact Header
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(bottom = 16.dp)
-                ) {
-                    if (matchedContact != null) {
-                        Text(
-                            text = matchedContact.name,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = IosBlue
-                        )
-                        Spacer(Modifier.height(4.dp))
-                    }
-
-                    Text(
-                        text = dialedNumber,
-                        fontSize = if (dialedNumber.length > 11) 32.sp else 40.sp,
-                        fontWeight = FontWeight.Light,
-                        fontFamily = FontFamily.SansSerif,
-                        letterSpacing = 1.sp,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1
-                    )
-
-                    if (dialedNumber.isNotBlank()) {
+            // T9 Matches Carousel
+            if (matchedContacts.isNotEmpty()) {
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(110.dp)) {
+                    items(matchedContacts) { c ->
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(top = 6.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { dialedNumber = c.phones.firstOrNull() ?: dialedNumber }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Add Number Pill
-                            Text(
-                                text = "Add Number",
-                                color = IosBlue,
-                                fontSize = 14.sp,
-                                modifier = Modifier.clickable {
-                                    showAddContactDialog.value = true
-                                }
-                            )
-
-                            Text("•", color = IosGrayText, fontSize = 14.sp)
-
-                            // Direct WhatsApp Pill
-                            Text(
-                                text = "WhatsApp",
-                                color = IosGreen,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable { onWhatsApp(dialedNumber) }
-                            )
+                            Icon(Icons.Default.Person, null, tint = IosBlue, modifier = Modifier.size(24.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(c.name, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                                Text(c.phones.firstOrNull() ?: "", fontSize = 12.sp, color = IosGrayText)
+                            }
                         }
+                    }
+                }
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
+
+            // Dialed Text Display
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 12.dp)) {
+                Text(
+                    text = dialedNumber,
+                    fontSize = if (dialedNumber.length > 11) 32.sp else 40.sp,
+                    fontWeight = FontWeight.Light,
+                    fontFamily = FontFamily.SansSerif,
+                    letterSpacing = 1.sp,
+                    maxLines = 1
+                )
+                if (dialedNumber.isNotBlank()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 4.dp)) {
+                        Text("Add Number", color = IosBlue, fontSize = 13.sp, modifier = Modifier.clickable { showAddContactDialog.value = true })
+                        Text("•", color = IosGrayText, fontSize = 13.sp)
+                        Text("WhatsApp", color = IosGreen, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onWhatsApp(dialedNumber) })
                     }
                 }
             }
 
-            // Keypad Grid 3x4
-            keys.chunked(3).forEach { row ->
+            // Dual SIM Toggle Strip
+            if (simAccounts.size > 1) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 5.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                    modifier = Modifier.padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    simAccounts.forEachIndexed { idx, _ ->
+                        FilterChip(
+                            selected = selectedSimIndex == idx,
+                            onClick = { selectedSimIndex = idx },
+                            label = { Text("SIM ${idx + 1}") }
+                        )
+                    }
+                }
+            }
+
+            // Keypad Grid
+            keys.chunked(3).forEach { row ->
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                     row.forEach { (digit, letters, _) ->
                         Box(
                             modifier = Modifier
-                                .size(78.dp)
+                                .size(76.dp)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .combinedClickable(
@@ -650,25 +809,10 @@ class MainActivity : ComponentActivity() {
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Text(
-                                    text = digit,
-                                    fontSize = 34.sp,
-                                    fontWeight = FontWeight.Normal,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    lineHeight = 36.sp
-                                )
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(digit, fontSize = 32.sp, fontWeight = FontWeight.Normal)
                                 if (letters.isNotBlank()) {
-                                    Text(
-                                        text = letters,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        letterSpacing = 1.5.sp
-                                    )
+                                    Text(letters, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }
@@ -676,151 +820,92 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
 
-            // iOS Call & Backspace Controls
+            // Action Row
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp, horizontal = 24.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 24.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Spacer(Modifier.size(54.dp)) // balancing space
-
-                // Apple Big Green Call Button
+                Spacer(Modifier.size(54.dp))
                 FilledIconButton(
-                    onClick = { if (dialedNumber.isNotBlank()) onCall(dialedNumber) },
+                    onClick = {
+                        val sim = simAccounts.getOrNull(selectedSimIndex)
+                        if (dialedNumber.isNotBlank()) onCall(dialedNumber, sim)
+                    },
                     shape = CircleShape,
                     colors = IconButtonDefaults.filledIconButtonColors(containerColor = IosGreen),
                     modifier = Modifier.size(76.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Call",
-                        tint = Color.White,
-                        modifier = Modifier.size(36.dp)
-                    )
+                    Icon(Icons.Default.Call, null, tint = Color.White, modifier = Modifier.size(36.dp))
                 }
-
-                // Apple Backspace Button
-                Box(
-                    modifier = Modifier.size(54.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.size(54.dp), contentAlignment = Alignment.Center) {
                     if (dialedNumber.isNotEmpty()) {
-                        IconButton(
-                            onClick = { dialedNumber = dialedNumber.dropLast(1) }
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Backspace,
-                                contentDescription = "Delete",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(28.dp)
-                            )
+                        IconButton(onClick = { dialedNumber = dialedNumber.dropLast(1) }) {
+                            Icon(Icons.AutoMirrored.Filled.Backspace, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
         }
     }
 
-    // --- TAB 2: iOS RECENTS SCREEN ---
+    // --- TAB 2: RECENTS WITH DELETE ---
     @Composable
     private fun IosRecentsScreen(
         calls: List<NexoraCall>,
-        onCall: (String) -> Unit
+        onCall: (String) -> Unit,
+        onDeleteCall: (String) -> Unit,
+        onDeleteAll: (String) -> Unit
     ) {
         var filterMissed by remember { mutableStateOf(false) }
-
-        val displayedCalls = remember(calls, filterMissed) {
-            if (filterMissed) calls.filter { it.type == CallLog.Calls.MISSED_TYPE } else calls
-        }
+        val displayed = if (filterMissed) calls.filter { it.type == CallLog.Calls.MISSED_TYPE } else calls
 
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-            Spacer(Modifier.height(16.dp))
-
-            // iOS Segmented Control
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.width(220.dp).height(32.dp)
-                ) {
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.width(220.dp).height(32.dp)) {
                     Row {
                         Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(7.dp))
-                                .background(if (!filterMissed) MaterialTheme.colorScheme.surface else Color.Transparent)
-                                .clickable { filterMissed = false },
+                            modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(7.dp)).background(if (!filterMissed) MaterialTheme.colorScheme.surface else Color.Transparent).clickable { filterMissed = false },
                             contentAlignment = Alignment.Center
-                        ) {
-                            Text("All", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                        ) { Text("All", fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
                         Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(7.dp))
-                                .background(if (filterMissed) MaterialTheme.colorScheme.surface else Color.Transparent)
-                                .clickable { filterMissed = true },
+                            modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(7.dp)).background(if (filterMissed) MaterialTheme.colorScheme.surface else Color.Transparent).clickable { filterMissed = true },
                             contentAlignment = Alignment.Center
-                        ) {
-                            Text("Missed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                        ) { Text("Missed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
                     }
                 }
             }
 
-            Text(
-                text = "Recents",
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
+            Text("Recents", fontSize = 34.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
 
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(displayedCalls, key = { it.id }) { call ->
+                items(displayed, key = { it.id }) { call ->
                     val isMissed = call.type == CallLog.Calls.MISSED_TYPE
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onCall(call.number) }
-                            .padding(vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().clickable { onCall(call.number) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = call.name,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isMissed) IosRed else MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${call.number} • ${SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(call.date))}",
-                                fontSize = 14.sp,
-                                color = IosGrayText
-                            )
+                            Text(call.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = if (isMissed) IosRed else MaterialTheme.colorScheme.onSurface)
+                            Text("${call.number} • ${SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(call.date))} (${call.duration}s)", fontSize = 13.sp, color = IosGrayText)
                         }
-                        IconButton(onClick = { onCall(call.number) }) {
-                            Icon(Icons.Default.Info, contentDescription = "Info", tint = IosBlue)
+                        IconButton(onClick = { onDeleteCall(call.id) }) {
+                            Icon(Icons.Default.DeleteOutline, null, tint = IosRed)
+                        }
+                        IconButton(onClick = { onDeleteAll(call.number) }) {
+                            Icon(Icons.Default.ClearAll, null, tint = IosGrayText)
                         }
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 }
             }
         }
     }
 
-    // --- TAB 3: iOS CONTACTS LIST ---
+    // --- TAB 3: CONTACTS ---
     @Composable
     private fun IosContactsScreen(
         contacts: List<NexoraContact>,
@@ -828,37 +913,16 @@ class MainActivity : ComponentActivity() {
         onAddClick: () -> Unit
     ) {
         var search by remember { mutableStateOf("") }
-
-        val filtered = remember(contacts, search) {
-            if (search.isBlank()) contacts
-            else contacts.filter {
-                it.name.contains(search, ignoreCase = true) || it.phones.any { p -> p.contains(search) }
-            }
-        }
+        val filtered = if (search.isBlank()) contacts else contacts.filter { it.name.contains(search, true) || it.phones.any { p -> p.contains(search) } }
 
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Contacts",
-                    fontSize = 34.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                IconButton(onClick = onAddClick) {
-                    Icon(Icons.Default.Add, contentDescription = "Add", tint = IosBlue, modifier = Modifier.size(30.dp))
-                }
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Contacts", fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onAddClick) { Icon(Icons.Default.Add, null, tint = IosBlue, modifier = Modifier.size(30.dp)) }
             }
 
-            // iOS Search Bar
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth().height(42.dp)
-            ) {
+            Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().height(42.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 10.dp)) {
                     Icon(Icons.Default.Search, null, tint = IosGrayText)
                     Spacer(Modifier.width(8.dp))
@@ -867,38 +931,26 @@ class MainActivity : ComponentActivity() {
                         onValueChange = { search = it },
                         placeholder = { Text("Search", color = IosGrayText, fontSize = 15.sp) },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color.Transparent,
-                            unfocusedBorderColor = Color.Transparent
-                        ),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent),
                         singleLine = true
                     )
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(filtered, key = { it.id }) { c ->
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onContactClick(c) }
-                            .padding(vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().clickable { onContactClick(c) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Box(modifier = Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
                             Text(c.name.take(1).uppercase(), fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
-                        Spacer(Modifier.width(14.dp))
+                        Spacer(Modifier.width(12.dp))
                         Column {
-                            Text(c.name, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                            Text(c.name, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                             Text(c.phones.firstOrNull() ?: "", fontSize = 13.sp, color = IosGrayText)
                         }
                     }
@@ -908,57 +960,46 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- TAB 4: iOS FAVORITES ---
+    // --- TAB 4: FAVORITES ---
     @Composable
-    private fun IosFavoritesScreen(
-        contacts: List<NexoraContact>,
-        onContactClick: (NexoraContact) -> Unit,
-        onCall: (String) -> Unit
-    ) {
+    private fun IosFavoritesScreen(contacts: List<NexoraContact>, onContactClick: (NexoraContact) -> Unit, onCall: (String) -> Unit) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             Text("Favorites", fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
-
-            if (contacts.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No Favorites Added Yet", color = IosGrayText)
-                }
-            } else {
-                LazyColumn {
-                    items(contacts) { c ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onContactClick(c) }
-                                .padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Star, contentDescription = null, tint = IosOrange, modifier = Modifier.size(26.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(c.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                                Text("mobile", fontSize = 13.sp, color = IosGrayText)
-                            }
-                            IconButton(onClick = { c.phones.firstOrNull()?.let(onCall) }) {
-                                Icon(Icons.Default.Call, null, tint = IosGreen)
-                            }
+            LazyColumn {
+                items(contacts) { c ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onContactClick(c) }.padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Star, null, tint = IosOrange, modifier = Modifier.size(24.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(c.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                            Text(c.phones.firstOrNull() ?: "", fontSize = 13.sp, color = IosGrayText)
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                        IconButton(onClick = { c.phones.firstOrNull()?.let(onCall) }) { Icon(Icons.Default.Call, null, tint = IosGreen) }
                     }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 }
             }
         }
     }
 
-    // --- TAB 5: iOS SETTINGS, BACKUP, PIN & SPEED DIAL ---
+    // --- TAB 5: SETTINGS, CALL STATS & SECURITY ---
     @Composable
     private fun IosSettingsScreen(
         contacts: List<NexoraContact>,
-        onExportVcf: () -> String,
-        onImportVcf: () -> String,
+        calls: List<NexoraCall>,
+        themeMode: String,
+        onThemeChange: (String) -> Unit,
+        onExportAes: () -> String,
+        onRestoreAes: () -> String,
         hasPin: Boolean,
         onSetPin: (String) -> Unit,
         onRemovePin: () -> Unit,
+        isScreenSecured: Boolean,
+        onToggleScreenSecurity: (Boolean) -> Unit,
         onAssignSpeedDial: (String, String) -> Unit
     ) {
         var status by remember { mutableStateOf("") }
@@ -966,207 +1007,168 @@ class MainActivity : ComponentActivity() {
         var speedKey by remember { mutableStateOf("2") }
         var speedNum by remember { mutableStateOf("") }
 
+        val totalTalkTime = calls.sumOf { it.duration }
+
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Text("Settings & iCloud", fontSize = 34.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(16.dp))
+            Text("Settings & Intelligence", fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(14.dp))
 
-            // iOS Card: Backup & vCard Export
-            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Apple vCard (.VCF) System", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text("Export or restore address book across iOS devices", fontSize = 12.sp, color = IosGrayText)
-                    Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { status = onExportVcf() }, colors = ButtonDefaults.buttonColors(containerColor = IosBlue), modifier = Modifier.weight(1f)) {
-                            Text("Export .VCF")
-                        }
-                        OutlinedButton(onClick = { status = onImportVcf() }, modifier = Modifier.weight(1f)) {
-                            Text("Import .VCF")
+            // Call Analytics Intelligence Card
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Call Intelligence & Analytics", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Total Calls Logged: ${calls.size}", fontSize = 13.sp)
+                    Text("Total Talk Time: ${totalTalkTime / 60} minutes (${totalTalkTime}s)", fontSize = 13.sp)
+                    Text("Incoming: ${calls.count { it.type == CallLog.Calls.INCOMING_TYPE }} | Outgoing: ${calls.count { it.type == CallLog.Calls.OUTGOING_TYPE }} | Missed: ${calls.count { it.type == CallLog.Calls.MISSED_TYPE }}", fontSize = 13.sp)
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Theme Setting
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Appearance Theme", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                        listOf("system", "light", "dark").forEach { m ->
+                            FilterChip(selected = themeMode == m, onClick = { onThemeChange(m) }, label = { Text(m.replaceFirstChar { it.uppercase() }) })
                         }
                     }
                 }
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // iOS Card: Speed Dial Setup
-            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Speed Dial Long-Press (1–9)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = speedKey,
-                            onValueChange = { if (it.length <= 1) speedKey = it },
-                            label = { Text("Key") },
-                            modifier = Modifier.width(70.dp)
-                        )
-                        OutlinedTextField(
-                            value = speedNum,
-                            onValueChange = { speedNum = it },
-                            label = { Text("Phone Number") },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Button(
-                        onClick = {
-                            if (speedKey.isNotBlank() && speedNum.isNotBlank()) {
-                                onAssignSpeedDial(speedKey, speedNum)
-                                speedNum = ""
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = IosGreen),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Bind to Keypad")
+            // Hardware Keystore AES-256 Card
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Hardware Keystore AES-256 Backup", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                        Button(onClick = { status = onExportAes() }, colors = ButtonDefaults.buttonColors(containerColor = IosBlue), modifier = Modifier.weight(1f)) {
+                            Text("Export Backup")
+                        }
+                        OutlinedButton(onClick = { status = onRestoreAes() }, modifier = Modifier.weight(1f)) {
+                            Text("Restore")
+                        }
                     }
                 }
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // iOS Card: FaceID / Passcode Lock
-            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Passcode Lock", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text(if (hasPin) "Active" else "Off", color = if (hasPin) IosGreen else IosGrayText)
+            // Screen Security Toggle (Anti-Screenshot)
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Row(modifier = Modifier.padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Anti-Screenshot Guard", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text("Block capture & screen recordings", fontSize = 12.sp, color = IosGrayText)
                     }
-                    Spacer(Modifier.height(8.dp))
-                    if (hasPin) {
-                        Button(onClick = onRemovePin, colors = ButtonDefaults.buttonColors(containerColor = IosRed), modifier = Modifier.fillMaxWidth()) {
-                            Text("Turn Passcode Off")
-                        }
-                    } else {
-                        OutlinedTextField(
-                            value = pinInput,
-                            onValueChange = { if (it.length <= 4) pinInput = it },
-                            placeholder = { Text("Set 4-digit Passcode") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Button(
-                            onClick = {
-                                if (pinInput.length == 4) {
-                                    onSetPin(pinInput)
-                                    status = "Passcode Enabled"
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = IosBlue),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Turn Passcode On")
-                        }
-                    }
+                    Switch(checked = isScreenSecured, onCheckedChange = onToggleScreenSecurity)
                 }
             }
 
             if (status.isNotBlank()) {
-                Text(status, color = IosBlue, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                Text(status, color = IosBlue, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
     }
 
-    // --- FULL SCREEN: iOS IN-CALL OVERLAY SCREEN ---
+    // --- REAL TELECOM IN-CALL OVERLAY SCREEN ---
     @Composable
-    private fun IosInCallScreen(number: String, contactName: String, onEndCall: () -> Unit) {
-        var isMuted by remember { mutableStateOf(false) }
-        var isSpeaker by remember { mutableStateOf(false) }
-        var isOnHold by remember { mutableStateOf(false) }
-        var seconds by remember { mutableStateOf(0) }
+    private fun RealInCallScreen(call: Call) {
+        val callState = call.state
+        val details = call.details
+        val number = details?.handle?.schemeSpecificPart ?: "Unknown"
+        val name = findContactName(number)
 
-        LaunchedEffect(Unit) {
-            while (true) {
-                delay(1000L)
-                seconds++
+        val audioState by NexoraInCallService.callAudioStateFlow.collectAsState()
+        val isMuted = audioState?.isMuted == true
+        val isSpeaker = audioState?.route == CallAudioState.ROUTE_SPEAKER
+
+        var timerSeconds by remember { mutableIntStateOf(0) }
+        LaunchedEffect(callState) {
+            if (callState == Call.STATE_ACTIVE) {
+                while (true) {
+                    delay(1000L)
+                    timerSeconds++
+                }
             }
         }
 
-        val timerStr = String.format(Locale.getDefault(), "%02d:%02d", seconds / 60, seconds % 60)
+        val stateText = when (callState) {
+            Call.STATE_RINGING -> "Incoming Call..."
+            Call.STATE_DIALING -> "Calling..."
+            Call.STATE_HOLDING -> "On Hold"
+            Call.STATE_ACTIVE -> String.format(Locale.getDefault(), "%02d:%02d", timerSeconds / 60, timerSeconds % 60)
+            else -> "Connecting..."
+        }
 
-        Surface(modifier = Modifier.fillMaxSize(), color = IosDarkBackground) {
+        Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 28.dp, vertical = 48.dp)
-                    .navigationBarsPadding(),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 48.dp).navigationBarsPadding(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Caller Header
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 24.dp)) {
-                    Text(
-                        text = if (contactName.isNotBlank() && contactName != number) contactName else number,
-                        color = Color.White,
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 28.dp)) {
+                    Text(name, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = if (isOnHold) "call on hold" else timerStr,
-                        color = Color.Gray,
-                        fontSize = 18.sp
-                    )
+                    Text(stateText, color = Color.Gray, fontSize = 18.sp)
                 }
 
-                // Apple 6-Icon In-Call Control Grid
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(28.dp)
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                        IosCallCircleBtn(
-                            icon = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                            label = "mute",
-                            active = isMuted,
-                            onClick = { isMuted = !isMuted }
-                        )
-                        IosCallCircleBtn(
-                            icon = Icons.Default.Dialpad,
-                            label = "keypad",
-                            active = false,
-                            onClick = {}
-                        )
-                        IosCallCircleBtn(
-                            icon = Icons.Default.VolumeUp,
-                            label = "audio",
-                            active = isSpeaker,
-                            onClick = { isSpeaker = !isSpeaker }
-                        )
+                // If Ringing -> Answer / Reject Buttons
+                if (callState == Call.STATE_RINGING) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        FilledIconButton(
+                            onClick = { NexoraInCallService.rejectCall() },
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = IosRed),
+                            modifier = Modifier.size(76.dp)
+                        ) {
+                            Icon(Icons.Default.CallEnd, null, tint = Color.White, modifier = Modifier.size(36.dp))
+                        }
+                        FilledIconButton(
+                            onClick = { NexoraInCallService.answerCall() },
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = IosGreen),
+                            modifier = Modifier.size(76.dp)
+                        ) {
+                            Icon(Icons.Default.Call, null, tint = Color.White, modifier = Modifier.size(36.dp))
+                        }
+                    }
+                } else {
+                    // Active Call Control Grid
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                            IosCallCircleBtn(
+                                icon = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                                label = "mute",
+                                active = isMuted,
+                                onClick = { NexoraInCallService.setMuted(!isMuted) }
+                            )
+                            IosCallCircleBtn(
+                                icon = Icons.Default.VolumeUp,
+                                label = "speaker",
+                                active = isSpeaker,
+                                onClick = { NexoraInCallService.toggleSpeaker(!isSpeaker) }
+                            )
+                            IosCallCircleBtn(
+                                icon = Icons.Default.Pause,
+                                label = "hold",
+                                active = callState == Call.STATE_HOLDING,
+                                onClick = { NexoraInCallService.holdCall(callState != Call.STATE_HOLDING) }
+                            )
+                        }
                     }
 
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                        IosCallCircleBtn(
-                            icon = Icons.Default.Add,
-                            label = "add call",
-                            active = false,
-                            onClick = {}
-                        )
-                        IosCallCircleBtn(
-                            icon = Icons.Default.Videocam,
-                            label = "FaceTime",
-                            active = false,
-                            onClick = {}
-                        )
-                        IosCallCircleBtn(
-                            icon = Icons.Default.Pause,
-                            label = "hold",
-                            active = isOnHold,
-                            onClick = { isOnHold = !isOnHold }
-                        )
+                    // End Call
+                    FilledIconButton(
+                        onClick = { NexoraInCallService.disconnectCall() },
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = IosRed),
+                        modifier = Modifier.size(76.dp)
+                    ) {
+                        Icon(Icons.Default.CallEnd, null, tint = Color.White, modifier = Modifier.size(38.dp))
                     }
-                }
-
-                // Apple Big Red End Call Button
-                FilledIconButton(
-                    onClick = onEndCall,
-                    shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = IosRed),
-                    modifier = Modifier.size(76.dp)
-                ) {
-                    Icon(Icons.Default.CallEnd, contentDescription = "End Call", tint = Color.White, modifier = Modifier.size(38.dp))
                 }
             }
         }
@@ -1183,19 +1185,14 @@ class MainActivity : ComponentActivity() {
                     .clickable(onClick = onClick),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = label,
-                    tint = if (active) Color.Black else Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
+                Icon(icon, contentDescription = label, tint = if (active) Color.Black else Color.White, modifier = Modifier.size(32.dp))
             }
             Spacer(Modifier.height(8.dp))
-            Text(text = label, color = Color.White, fontSize = 12.sp)
+            Text(label, color = Color.White, fontSize = 12.sp)
         }
     }
 
-    // --- SCREEN: iOS CONTACT DETAILS ---
+    // --- CONTACT DETAIL & CRUD SHEET ---
     @Composable
     private fun IosContactDetailScreen(
         contact: NexoraContact,
@@ -1203,123 +1200,99 @@ class MainActivity : ComponentActivity() {
         onCall: (String) -> Unit,
         onSms: (String) -> Unit,
         onWhatsApp: (String) -> Unit,
-        onGroupChange: (String) -> Unit
+        onTelegram: (String) -> Unit,
+        onEdit: () -> Unit,
+        onDelete: () -> Unit
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("‹ Back", color = IosBlue, fontSize = 17.sp, modifier = Modifier.clickable(onClick = onBack))
-                Text("Edit", color = IosBlue, fontSize = 17.sp)
+                Text("Edit", color = IosBlue, fontSize = 17.sp, modifier = Modifier.clickable(onClick = onEdit))
             }
-
-            Spacer(Modifier.height(24.dp))
-
+            Spacer(Modifier.height(20.dp))
             Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                    modifier = Modifier.size(80.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.size(80.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
                     Text(contact.name.take(1).uppercase(), fontSize = 34.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(10.dp))
                 Text(contact.name, fontSize = 26.sp, fontWeight = FontWeight.Bold)
             }
-
             Spacer(Modifier.height(20.dp))
-
-            // iOS Action Pill Buttons (Message, Call, Video, WhatsApp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                IosActionBox(icon = Icons.Default.ChatBubble, label = "message", onClick = { contact.phones.firstOrNull()?.let(onSms) })
-                IosActionBox(icon = Icons.Default.Call, label = "call", onClick = { contact.phones.firstOrNull()?.let(onCall) })
-                IosActionBox(icon = Icons.Default.Videocam, label = "FaceTime", onClick = {})
-                IosActionBox(icon = Icons.Default.Share, label = "WhatsApp", onClick = { contact.phones.firstOrNull()?.let(onWhatsApp) })
+                IosActionBox(icon = Icons.Default.ChatBubble, label = "message") { contact.phones.firstOrNull()?.let(onSms) }
+                IosActionBox(icon = Icons.Default.Call, label = "call") { contact.phones.firstOrNull()?.let(onCall) }
+                IosActionBox(icon = Icons.Default.Share, label = "WhatsApp") { contact.phones.firstOrNull()?.let(onWhatsApp) }
+                IosActionBox(icon = Icons.Default.Send, label = "Telegram") { contact.phones.firstOrNull()?.let(onTelegram) }
             }
-
-            Spacer(Modifier.height(24.dp))
-
+            Spacer(Modifier.height(20.dp))
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("mobile", fontSize = 13.sp, color = IosGrayText)
-                    Text(contact.phones.joinToString(", "), fontSize = 18.sp, color = IosBlue)
+                    Text(contact.phones.joinToString(", "), fontSize = 17.sp, color = IosBlue)
                 }
+            }
+            Spacer(Modifier.height(14.dp))
+            Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = IosRed), modifier = Modifier.fillMaxWidth()) {
+                Text("Delete Contact")
             }
         }
     }
 
     @Composable
     private fun IosActionBox(icon: ImageVector, label: String, onClick: () -> Unit) {
-        Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.size(76.dp, 60.dp).clickable(onClick = onClick)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(icon, contentDescription = label, tint = IosBlue, modifier = Modifier.size(22.dp))
+        Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(76.dp, 60.dp).clickable(onClick = onClick)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Icon(icon, null, tint = IosBlue, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.height(4.dp))
                 Text(label, fontSize = 11.sp, color = IosBlue)
             }
         }
     }
 
-    // --- DIALOG: iOS SHEET ADD CONTACT ---
     @Composable
-    private fun IosAddContactSheet(onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
-        var name by remember { mutableStateOf("") }
-        var phone by remember { mutableStateOf("") }
+    private fun IosContactEditSheet(
+        contact: NexoraContact?,
+        onDismiss: () -> Unit,
+        onSave: (String, String, String, String, String) -> Unit
+    ) {
+        var name by remember { mutableStateOf(contact?.name ?: "") }
+        var phone by remember { mutableStateOf(contact?.phones?.firstOrNull() ?: "") }
+        var email by remember { mutableStateOf(contact?.email ?: "") }
+        var company by remember { mutableStateOf(contact?.company ?: "") }
+        var group by remember { mutableStateOf(contact?.group ?: "General") }
 
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("New Contact", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+            title = { Text(if (contact != null) "Edit Contact" else "New Contact", fontWeight = FontWeight.Bold) },
             text = {
-                Column {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { name = it },
-                        placeholder = { Text("First and Last Name") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = phone,
-                        onValueChange = { phone = it },
-                        placeholder = { Text("Phone Number") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = name, onValueChange = { name = it }, placeholder = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = phone, onValueChange = { phone = it }, placeholder = { Text("Phone") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = email, onValueChange = { email = it }, placeholder = { Text("Email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = company, onValueChange = { company = it }, placeholder = { Text("Company") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
             },
             confirmButton = {
-                TextButton(onClick = { if (name.isNotBlank() && phone.isNotBlank()) onSave(name, phone, "General") }) {
+                TextButton(onClick = { if (name.isNotBlank() && phone.isNotBlank()) onSave(name, phone, email, company, group) }) {
                     Text("Done", color = IosBlue, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel", color = IosRed)
-                }
+                TextButton(onClick = onDismiss) { Text("Cancel", color = IosRed) }
             }
         )
     }
 
-    // --- LOCK SCREEN: APPLE PIN ENTRY ---
+    // --- LOCK SCREEN PASSCODE ---
     @Composable
     private fun IosPasscodeScreen(correctPin: String, onUnlocked: () -> Unit) {
         var enteredPin by remember { mutableStateOf("") }
         var hasError by remember { mutableStateOf(false) }
 
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
+            Column(modifier = Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("Enter Passcode", fontSize = 22.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(18.dp))
-
-                // Apple 4-Dot Indicators
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     for (i in 0 until 4) {
                         Box(
@@ -1331,25 +1304,14 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
-
                 Spacer(Modifier.height(30.dp))
-
-                // Numeric Keypad 1-9
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del").chunked(3).forEach { row ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         row.forEach { k ->
                             if (k.isEmpty()) {
                                 Spacer(Modifier.size(72.dp))
                             } else if (k == "del") {
-                                Box(
-                                    modifier = Modifier.size(72.dp).clickable {
-                                        if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1)
-                                    },
-                                    contentAlignment = Alignment.Center
-                                ) {
+                                Box(modifier = Modifier.size(72.dp).clickable { if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1) }, contentAlignment = Alignment.Center) {
                                     Text("Delete", fontSize = 15.sp)
                                 }
                             } else {
@@ -1367,14 +1329,11 @@ class MainActivity : ComponentActivity() {
                                             }
                                         },
                                     contentAlignment = Alignment.Center
-                                ) {
-                                    Text(k, fontSize = 28.sp)
-                                }
+                                ) { Text(k, fontSize = 28.sp) }
                             }
                         }
                     }
                 }
-
                 if (hasError) {
                     Text("Wrong Passcode", color = IosRed, modifier = Modifier.padding(top = 10.dp))
                 }
@@ -1382,45 +1341,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --- iOS 5-TAB BOTTOM NAVIGATION ---
+    // --- BOTTOM NAVIGATION BAR ---
     @Composable
     private fun IosBottomNavigationBar(currentTab: NexoraTab, onTabSelected: (NexoraTab) -> Unit) {
-        NavigationBar(
-            containerColor = MaterialTheme.colorScheme.surface,
-            tonalElevation = 0.dp
-        ) {
+        NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
             NavigationBarItem(
                 selected = currentTab == NexoraTab.FAVORITES,
                 onClick = { onTabSelected(NexoraTab.FAVORITES) },
-                icon = { Icon(Icons.Default.Star, contentDescription = null) },
+                icon = { Icon(Icons.Default.Star, null) },
                 label = { Text("Favorites", fontSize = 10.sp) },
                 colors = NavigationBarItemDefaults.colors(selectedIconColor = IosBlue, selectedTextColor = IosBlue)
             )
             NavigationBarItem(
                 selected = currentTab == NexoraTab.RECENTS,
                 onClick = { onTabSelected(NexoraTab.RECENTS) },
-                icon = { Icon(Icons.Default.AccessTime, contentDescription = null) },
+                icon = { Icon(Icons.Default.AccessTime, null) },
                 label = { Text("Recents", fontSize = 10.sp) },
                 colors = NavigationBarItemDefaults.colors(selectedIconColor = IosBlue, selectedTextColor = IosBlue)
             )
             NavigationBarItem(
                 selected = currentTab == NexoraTab.CONTACTS,
                 onClick = { onTabSelected(NexoraTab.CONTACTS) },
-                icon = { Icon(Icons.Default.Person, contentDescription = null) },
+                icon = { Icon(Icons.Default.Person, null) },
                 label = { Text("Contacts", fontSize = 10.sp) },
                 colors = NavigationBarItemDefaults.colors(selectedIconColor = IosBlue, selectedTextColor = IosBlue)
             )
             NavigationBarItem(
                 selected = currentTab == NexoraTab.DIALER,
                 onClick = { onTabSelected(NexoraTab.DIALER) },
-                icon = { Icon(Icons.Default.Dialpad, contentDescription = null) },
+                icon = { Icon(Icons.Default.Dialpad, null) },
                 label = { Text("Keypad", fontSize = 10.sp) },
                 colors = NavigationBarItemDefaults.colors(selectedIconColor = IosBlue, selectedTextColor = IosBlue)
             )
             NavigationBarItem(
                 selected = currentTab == NexoraTab.SETTINGS,
                 onClick = { onTabSelected(NexoraTab.SETTINGS) },
-                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                icon = { Icon(Icons.Default.Settings, null) },
                 label = { Text("Settings", fontSize = 10.sp) },
                 colors = NavigationBarItemDefaults.colors(selectedIconColor = IosBlue, selectedTextColor = IosBlue)
             )
@@ -1428,18 +1384,29 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- iOS COLOR SCHEME THEME ---
+// --- THEME ---
 @Composable
-private fun NexoraIosTheme(content: @Composable () -> Unit) {
+private fun NexoraIosTheme(darkTheme: Boolean, content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = lightColorScheme(
-            background = Color.White,
-            surface = Color(0xFFF9F9FB),
-            surfaceVariant = Color(0xFFE5E5EA),
-            onSurface = Color.Black,
-            onSurfaceVariant = Color(0xFF3A3A3C),
-            primary = IosBlue
-        ),
+        colorScheme = if (darkTheme) {
+            darkColorScheme(
+                background = Color.Black,
+                surface = Color(0xFF1C1C1E),
+                surfaceVariant = Color(0xFF2C2C2E),
+                onSurface = Color.White,
+                onSurfaceVariant = Color(0xFFA1A1A6),
+                primary = IosBlue
+            )
+        } else {
+            lightColorScheme(
+                background = Color.White,
+                surface = Color(0xFFF9F9FB),
+                surfaceVariant = Color(0xFFE5E5EA),
+                onSurface = Color.Black,
+                onSurfaceVariant = Color(0xFF3A3A3C),
+                primary = IosBlue
+            )
+        },
         content = content
     )
 }
